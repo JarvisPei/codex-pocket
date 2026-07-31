@@ -1,0 +1,27 @@
+# Local upstream checkout
+vendor/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local runtime/output
+.runtime/
+tmp/
+build/
+dist/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Local environment files
+.env
+!.env.example
+
+# Node install cache
+node_modules/
+
+# Windows extras
+Thumbs.db
+Desktop.ini
