@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.codex-pocket-hotspot</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO_ROOT__/local_hotspot_proxy.py</string>
+    <string>--listen-host</string>
+    <string>__LISTEN_HOST__</string>
+    <string>--port</string>
+    <string>4318</string>
+    <string>--expected-gateway</string>
+    <string>__EXPECTED_GATEWAY__</string>
+    <string>--expected-interface</string>
+    <string>__EXPECTED_INTERFACE__</string>
+    <string>--certificate</string>
+    <string>__CERTIFICATE__</string>
+    <string>--private-key</string>
+    <string>__PRIVATE_KEY__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PYTHONPYCACHEPREFIX</key>
+    <string>/private/tmp/codex-pocket-hotspot-pycache</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <key>StandardOutPath</key>
+  <string>__USER_LOG_DIR__/codex-pocket-hotspot.log</string>
+  <key>StandardErrorPath</key>
+  <string>__USER_LOG_DIR__/codex-pocket-hotspot.error.log</string>
+</dict>
+</plist>

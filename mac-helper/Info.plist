@@ -25,5 +25,7 @@
   <true/>
   <key>NSAccessibilityUsageDescription</key>
   <string>读取并定位 Codex 任务，在用户从已配对设备发送指令后写入输入框、按下 Send，或在明确确认后按下 Stop。</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>仅在用户从已配对设备发送图片时，通过 macOS System Events 执行标准粘贴，将图片附加到当前 Codex 任务。</string>
 </dict>
 </plist>

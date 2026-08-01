@@ -12,12 +12,17 @@ Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve
 - 在 Project 或 Recents 中新建任务，并交给 Desktop 执行第一条指令。
 - 查看最近历史、最终回复及按原位置穿插的 `Working` / `Worked` 活动摘要。
 - 从手机向已有 Desktop 任务发送后续指令。
-- 查看运行、暂停、完成状态，并安全停止当前 Desktop 任务。
+- 从手机附加文件或图片；每条最多 4 个、单个最多 20 MB。
+- 查看运行、暂停、完成状态，并按任务 ID 切换后安全停止任意运行中的 Desktop 任务。
 - 修改任务的模型、推理等级和 Fast 服务档位。
 - 查看剩余 Usage。
 - 处理一次性命令/文件批准与结构化用户问题。
 - 五分钟单次配对二维码、每台设备独立凭据和设备撤销。
 - 长对话增量刷新、新内容提示和可拖动滚动条。
+- 可选 Android 系统通知：任务完成、暂停或需要确认时提醒，点击可回到对应任务。
+- 可选热点本地 HTTPS：手机同时为 Mac 提供热点时，绕过远端 DERP 中继直接访问。
+
+系统通知默认关闭，需要在手机抽屉中主动开启。通知只包含任务标题和状态，不包含回复正文。当前实现依赖 Codex Pocket 页面仍打开或保留在浏览器后台；彻底结束浏览器进程后不会继续轮询，也没有把通知内容交给第三方推送平台。
 
 ## 工作方式
 
@@ -81,6 +86,29 @@ tailscale serve status
 
 随后使用 Tailscale 提供的 HTTPS 地址访问。
 
+## 手机热点本地直连（可选）
+
+当 Android 手机同时作为热点和控制端时，运营商 NAT 可能让 Tailscale 退回远端 DERP。保持手机与 Mac 都在该热点拓扑下，在 Mac 运行：
+
+```sh
+zsh scripts/install-local-hotspot-proxy.sh [port]
+```
+
+安装器会记录当前 Mac 热点 IP、手机网关和 Wi-Fi 接口，并创建独立的 TLS 反向代理：
+
+- 主 Bridge 仍只监听 `127.0.0.1:4317`；
+- 本地代理仅在记录的热点网关与接口同时匹配时监听 `https://<热点中的 Mac IP>:4318/`；
+- TLS 根证书带有 critical name constraints，只允许该热点 IP 与 `codex-pocket.local`；
+- 本地入口继续使用每台设备独立凭据，不暴露 Keychain 主凭据。
+
+安装后先通过原 Tailscale 页面打开抽屉，点击底部的 `⌁`：
+
+1. 下载 CA 证书，并在 Android 的“安装 CA 证书”设置中安装；
+2. 返回页面，再次点击 `⌁`，选择“切换到本地”；
+3. 页面会使用五分钟单次票据为本地 HTTPS origin 建立独立设备凭据。
+
+离开该热点后，本地代理会暂停监听；从本地页面可切回保存的 Tailscale origin。证书私钥只保存在 Mac 用户目录，权限为 `0600`。
+
 ## 配对手机
 
 在 Mac 上生成五分钟有效、只能使用一次的二维码：
@@ -103,10 +131,12 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 ## 安全边界
 
 - 仅允许绑定 `127.0.0.1`。
+- 可选热点代理是独立 TLS 进程；只反向代理到 loopback，并锁定预配置的 IP、网关、接口与 Host。
 - 不提供 CORS、通用 shell、任意 JSON-RPC 或原始 app-server 代理。
 - 每台手机拥有独立随机凭据；Mac 只保存其 SHA-256 摘要。
 - Keychain 主凭据不会发送到手机。
 - Desktop 发送前验证精确任务 ID、任务标题、空输入框和唯一 Send 控件。
+- 附件按配对设备隔离，只写入权限为 `0700` 的专用目录；一小时过期，Helper 拒绝目录外路径。
 - Stop 必须经过显式确认，并且只能按下唯一语义 Stop 控件。
 - 日志只记录元数据，不记录 Authorization 或完整指令正文。
 - 远程链接与 Markdown 使用安全、无 `innerHTML` 的渲染路径。
@@ -119,11 +149,10 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 python3 -m unittest tests.test_mac_bridge
 ```
 
-当前测试覆盖设备配对、Project/Recents 归属、Desktop 发送与停止、历史序列化、活动分组、模型设置、Usage、新建任务和失败保护。
+当前测试覆盖设备配对、附件归属与路径保护、Project/Recents 归属、Desktop 发送与停止、历史序列化、活动分组、模型设置、Usage、新建任务和失败保护。
 
 ## 当前限制
 
-- 手机附件尚未开放。
 - Bridge 依赖 Codex Desktop 当前的 Accessibility 结构；Desktop UI 大幅变化时可能需要更新 Helper。
 - 只支持单用户、单 Mac 的私人部署，不是多人 SaaS。
 

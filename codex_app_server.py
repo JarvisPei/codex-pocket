@@ -1012,6 +1012,28 @@ def summarize_thread(
         if isinstance(assignments, dict) and isinstance(projects, dict):
             project_id = assignments.get(thread_id)
             candidate = projects.get(project_id)
+            if not isinstance(candidate, dict) and cwd:
+                try:
+                    normalized_cwd = os.path.normcase(os.path.realpath(cwd))
+                except (OSError, TypeError, ValueError):
+                    normalized_cwd = ""
+                matches = []
+                for candidate_id, value in projects.items():
+                    if not isinstance(value, dict) or not isinstance(value.get("path"), str):
+                        continue
+                    try:
+                        normalized_root = os.path.normcase(
+                            os.path.realpath(value["path"])
+                        )
+                        inside_root = os.path.commonpath(
+                            [normalized_cwd, normalized_root]
+                        ) == normalized_root
+                    except (OSError, TypeError, ValueError):
+                        continue
+                    if normalized_cwd and normalized_root and inside_root:
+                        matches.append((len(normalized_root), str(candidate_id), value))
+                if matches:
+                    _, project_id, candidate = max(matches, key=lambda match: match[0])
             if isinstance(candidate, dict):
                 project = {
                     "id": str(candidate.get("id", project_id)),
@@ -1047,7 +1069,34 @@ def _user_message_text(item: dict[str, Any]) -> str:
         and part.get("type") == "text"
         and isinstance(part.get("text"), str)
     ]
-    return _bounded_text("\n".join(parts), 20_000)
+    text = "\n".join(parts)
+    request_marker = "## My request for Codex:\n"
+    if text.lstrip().startswith("# Files mentioned by the user:") and request_marker in text:
+        text = text.split(request_marker, 1)[1]
+    return _bounded_text(text.strip(), 20_000)
+
+
+def _user_message_attachments(item: dict[str, Any]) -> list[dict[str, Any]]:
+    content = item.get("content")
+    if not isinstance(content, list):
+        return []
+    attachments = []
+    for part in content:
+        if (
+            not isinstance(part, dict)
+            or part.get("type") != "localImage"
+            or not isinstance(part.get("path"), str)
+        ):
+            continue
+        name = Path(part["path"]).name
+        attachments.append(
+            {
+                "type": "image",
+                "name": _bounded_text(name or "图片", 240),
+                "path": _bounded_text(part["path"], 2_000),
+            }
+        )
+    return attachments[:4]
 
 
 def _safe_item(item: Any) -> Optional[dict[str, Any]]:
@@ -1057,6 +1106,7 @@ def _safe_item(item: Any) -> Optional[dict[str, Any]]:
     base = {"id": str(item.get("id", "")), "type": item_type}
     if item_type == "userMessage":
         base["text"] = _user_message_text(item)
+        base["attachments"] = _user_message_attachments(item)
         return base
     if item_type == "agentMessage":
         base["text"] = _bounded_text(item.get("text"), 30_000)
@@ -1140,6 +1190,11 @@ def summarize_thread_detail(
                 for item in items[:200]:
                     safe_item = _safe_item(item)
                     if safe_item is not None:
+                        if (
+                            safe_item.get("type") == "userMessage"
+                            and turn.get("startedAt") is not None
+                        ):
+                            safe_item["timestamp"] = turn.get("startedAt")
                         safe_items.append(safe_item)
             activity_items = [
                 {
@@ -1154,6 +1209,22 @@ def summarize_thread_detail(
                 ).items()
                 if count > 0
             ]
+            if (
+                turn_is_active
+                and not activity_items
+                and not any(
+                    item.get("type") != "userMessage"
+                    for item in safe_items
+                )
+            ):
+                activity_items.append(
+                    {
+                        "id": f"rollout-{turn_id}-working",
+                        "type": "desktopActivity",
+                        "activityKind": "working",
+                        "count": 1,
+                    }
+                )
             final_agent_index = next(
                 (
                     index
@@ -1167,6 +1238,8 @@ def summarize_thread_detail(
                 for safe_item in reversed(safe_items):
                     if safe_item.get("type") == "agentMessage":
                         safe_item["phase"] = "final_answer"
+                        if turn.get("completedAt") is not None:
+                            safe_item["timestamp"] = turn.get("completedAt")
                         break
             safe_turns.append(
                 {

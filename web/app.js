@@ -9,8 +9,13 @@ const elements = {
   projectGroups: document.querySelector("#projectGroups"),
   refreshUsageButton: document.querySelector("#refreshUsageButton"),
   usageContent: document.querySelector("#usageContent"),
+  notificationButton: document.querySelector("#notificationButton"),
+  notificationStatus: document.querySelector("#notificationStatus"),
+  localConnectionButton: document.querySelector("#localConnectionButton"),
   deviceDot: document.querySelector("#deviceDot"),
   deviceStatus: document.querySelector("#deviceStatus"),
+  macBattery: document.querySelector("#macBattery"),
+  connectionLatency: document.querySelector("#connectionLatency"),
   selectedProjectName: document.querySelector("#selectedProjectName"),
   selectedThreadTitle: document.querySelector("#selectedThreadTitle"),
   liveBadge: document.querySelector("#liveBadge"),
@@ -24,6 +29,9 @@ const elements = {
   managedLiveHistory: document.querySelector("#managedLiveHistory"),
   historyNotice: document.querySelector("#historyNotice"),
   composerState: document.querySelector("#composerState"),
+  composerAttachments: document.querySelector("#composerAttachments"),
+  attachmentButton: document.querySelector("#attachmentButton"),
+  attachmentInput: document.querySelector("#attachmentInput"),
   composerInput: document.querySelector("#composerInput"),
   composerMode: document.querySelector("#composerMode"),
   modelSettingsButton: document.querySelector("#modelSettingsButton"),
@@ -33,6 +41,7 @@ const elements = {
   conversationHeader: document.querySelector(".conversation-header"),
   composerShell: document.querySelector(".composer-shell"),
   newContentButton: document.querySelector("#newContentButton"),
+  latestButtonLabel: document.querySelector("#latestButtonLabel"),
   scrollRail: document.querySelector("#scrollRail"),
   scrollThumb: document.querySelector("#scrollThumb"),
   stopDialog: document.querySelector("#stopDialog"),
@@ -43,6 +52,9 @@ const elements = {
   newTaskForm: document.querySelector("#newTaskForm"),
   newTaskDestination: document.querySelector("#newTaskDestination"),
   newTaskMessage: document.querySelector("#newTaskMessage"),
+  newTaskAttachments: document.querySelector("#newTaskAttachments"),
+  newTaskAttachmentButton: document.querySelector("#newTaskAttachmentButton"),
+  newTaskAttachmentInput: document.querySelector("#newTaskAttachmentInput"),
   newTaskModelHint: document.querySelector("#newTaskModelHint"),
   newTaskError: document.querySelector("#newTaskError"),
   newTaskCancel: document.querySelector("#newTaskCancel"),
@@ -65,6 +77,18 @@ const elements = {
   tokenError: document.querySelector("#tokenError"),
   tokenButton: document.querySelector("#tokenButton"),
   tokenCancel: document.querySelector("#tokenCancel"),
+  localConnectionDialog: document.querySelector("#localConnectionDialog"),
+  localConnectionDescription: document.querySelector("#localConnectionDescription"),
+  localConnectionSteps: document.querySelector("#localConnectionSteps"),
+  localCertificateDetails: document.querySelector("#localCertificateDetails"),
+  localCaFingerprint: document.querySelector("#localCaFingerprint"),
+  localConnectionError: document.querySelector("#localConnectionError"),
+  downloadLocalCaButton: document.querySelector("#downloadLocalCaButton"),
+  localConnectionCancel: document.querySelector("#localConnectionCancel"),
+  localConnectionSwitch: document.querySelector("#localConnectionSwitch"),
+  notificationHelpDialog: document.querySelector("#notificationHelpDialog"),
+  notificationHelpMessage: document.querySelector("#notificationHelpMessage"),
+  notificationHelpClose: document.querySelector("#notificationHelpClose"),
 };
 
 const DEVICE_TOKEN_KEY = "mobileCodexDeviceToken";
@@ -72,18 +96,36 @@ const LEGACY_TOKEN_KEY = "mobileCodexBridgeToken";
 const PAIRING_TICKET_KEY = "mobileCodexPairingTicket";
 const SELECTED_THREAD_KEY = "mobileCodexSelectedThread";
 const COLLAPSED_PROJECTS_KEY = "mobileCodexCollapsedProjects";
+const NOTIFICATIONS_ENABLED_KEY = "mobileCodexNotificationsEnabled";
+const REMOTE_ORIGIN_KEY = "codexPocketRemoteOrigin";
 const INITIAL_HISTORY_TURNS = 30;
 const MAX_HISTORY_TURNS = 60;
 const THREAD_CACHE_TTL_MS = 60_000;
+const THREAD_SESSION_CACHE_KEY = "codexPocketSelectedThreadHistoryV1";
+const THREAD_SESSION_CACHE_MAX_CHARS = 1_500_000;
+const PROJECT_THREAD_PREVIEW_LIMIT = 5;
+const MAX_ATTACHMENTS_PER_TURN = 4;
+const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 const fragmentParameters = new URLSearchParams(window.location.hash.slice(1));
 const pairedLegacyToken = fragmentParameters.get("token") || "";
 const pairedTicket = fragmentParameters.get("pairing") || "";
+const pairedRemoteOrigin = fragmentParameters.get("remote") || "";
 if (pairedLegacyToken.length >= 32) {
   sessionStorage.setItem(LEGACY_TOKEN_KEY, pairedLegacyToken);
 }
 if (pairedTicket.startsWith("pair1.")) {
   sessionStorage.setItem(PAIRING_TICKET_KEY, pairedTicket);
+}
+if (pairedTicket.startsWith("pair1.") && pairedRemoteOrigin) {
+  try {
+    const remote = new URL(pairedRemoteOrigin);
+    if (remote.protocol === "https:" && remote.origin === pairedRemoteOrigin) {
+      localStorage.setItem(REMOTE_ORIGIN_KEY, remote.origin);
+    }
+  } catch {
+    // Ignore malformed handoff metadata; pairing itself can still proceed.
+  }
 }
 if (window.location.hash) {
   history.replaceState(
@@ -114,26 +156,46 @@ let refreshTimer;
 let managedPollTimer;
 let desktopHistoryPollTimer;
 let drawerStatusPollTimer;
+let threadCatalogRetryTimer;
 let desktopHistoryRefreshInFlight = false;
 let statusRefreshPromise;
 let drawerStatusRefreshPromise;
 let usageRefreshPromise;
 let usageLastRefreshedAt = 0;
+let systemMetricsRefreshPromise;
+let systemMetricsLastRefreshedAt = 0;
+let localHotspotStatus = { configured: false, active: false };
+const bridgeLatencySamples = [];
 let isSendingMessage = false;
+let isUploadingAttachments = false;
 let isCreatingTask = false;
+let isUploadingNewTaskAttachments = false;
 let newTaskTarget;
+let newTaskAttachments = [];
 let managedRenderSignature = "";
 let scrollSyncFrame = 0;
 let scrollDrag;
 let desktopActivityEvidence;
+let hasUnseenNewContent = false;
+let isScrollingToLatest = false;
 let modelSettingsLoadingThreadId = "";
+let notificationsEnabled = localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) === "true";
+let serviceWorkerRegistrationPromise;
+let notificationBlockedReason = "";
+let notificationThreadId = new URLSearchParams(window.location.search).get("thread") || "";
+let threadNotificationsPrimed = false;
+let desktopRequestNotificationsPrimed = false;
 const completedRunsSeen = new Set();
 const persistedManagedTurnIds = new Set();
 const threadDrafts = new Map();
+const threadAttachments = new Map();
 const threadHistoryCache = new Map();
 const renderedThreadSignatures = new Map();
+let renderedThreadId = "";
 const modelSettingsCache = new Map();
 const expandedWorkedGroups = new Set();
+const threadNotificationStates = new Map();
+const expandedProjectThreadLists = new Set();
 let collapsedProjects = (() => {
   try {
     const stored = JSON.parse(localStorage.getItem(COLLAPSED_PROJECTS_KEY) || "[]");
@@ -148,8 +210,407 @@ function setDeviceState(kind, label) {
   elements.deviceStatus.textContent = label;
 }
 
+function usingLocalHotspotOrigin() {
+  if (!localHotspotStatus?.url) return false;
+  try {
+    return new URL(localHotspotStatus.url).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+function renderLocalConnectionState(status) {
+  localHotspotStatus = status?.configured
+    ? status
+    : { configured: false, active: false };
+  elements.localConnectionButton.hidden = !localHotspotStatus.configured;
+  const local = usingLocalHotspotOrigin();
+  elements.localConnectionButton.classList.toggle("active", local);
+  elements.localConnectionButton.title = local
+    ? "正在使用热点本地直连"
+    : localHotspotStatus.active
+      ? "热点本地直连可用"
+      : "热点本地直连当前不可用";
+}
+
 function authorizationHeaders() {
   return { Authorization: `Bearer ${deviceToken}` };
+}
+
+function renderMacBattery(battery) {
+  if (!battery?.available || !Number.isFinite(Number(battery.percent))) {
+    elements.macBattery.textContent = "电量不可用";
+    return;
+  }
+  const percent = Math.min(100, Math.max(0, Math.round(Number(battery.percent))));
+  const state = {
+    charging: "充电",
+    discharging: "放电",
+    full: "已满",
+  }[battery.state] || "";
+  elements.macBattery.textContent = `电量 ${percent}%${state ? ` · ${state}` : ""}`;
+}
+
+function renderConnectionLatency(milliseconds) {
+  elements.connectionLatency.className = "connection-latency";
+  if (!Number.isFinite(milliseconds)) {
+    elements.connectionLatency.classList.add("error");
+    elements.connectionLatency.textContent = "延迟不可用";
+    return;
+  }
+  const rounded = Math.max(1, Math.round(milliseconds));
+  let quality = "较弱";
+  let qualityClass = "poor";
+  if (rounded <= 80) {
+    quality = "优秀";
+    qualityClass = "excellent";
+  } else if (rounded <= 180) {
+    quality = "良好";
+    qualityClass = "good";
+  } else if (rounded <= 400) {
+    quality = "一般";
+    qualityClass = "fair";
+  }
+  elements.connectionLatency.classList.add(qualityClass);
+  elements.connectionLatency.textContent = `延迟 ${rounded} ms`;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5_000) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function measureBridgeLatency() {
+  const startedAt = performance.now();
+  const response = await fetchWithTimeout(
+    `/health?probe=${Date.now()}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) throw new Error("health probe failed");
+  await response.json();
+  return performance.now() - startedAt;
+}
+
+async function refreshSystemMetrics(force = false) {
+  if (!deviceToken || systemMetricsRefreshPromise) return systemMetricsRefreshPromise;
+  if (!force && Date.now() - systemMetricsLastRefreshedAt < 10_000) return;
+  systemMetricsRefreshPromise = (async () => {
+    const [latencyResult, metricsResult] = await Promise.allSettled([
+      measureBridgeLatency(),
+      fetchWithTimeout("/api/system/metrics", {
+        headers: authorizationHeaders(),
+        cache: "no-store",
+      }),
+    ]);
+    if (latencyResult.status === "fulfilled") {
+      bridgeLatencySamples.push(latencyResult.value);
+      if (bridgeLatencySamples.length > 5) bridgeLatencySamples.shift();
+      const sorted = [...bridgeLatencySamples].sort((left, right) => left - right);
+      renderConnectionLatency(sorted[Math.floor(sorted.length / 2)]);
+    } else {
+      renderConnectionLatency(Number.NaN);
+    }
+    if (metricsResult.status === "fulfilled") {
+      const response = metricsResult.value;
+      if (response.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+      if (response.ok) {
+        try {
+          const result = await response.json();
+          renderMacBattery(result.battery);
+          renderLocalConnectionState(result.localHotspot);
+        } catch {
+          renderMacBattery(undefined);
+          renderLocalConnectionState(undefined);
+        }
+      } else {
+        renderMacBattery(undefined);
+        renderLocalConnectionState(undefined);
+      }
+    } else {
+      renderMacBattery(undefined);
+      renderLocalConnectionState(undefined);
+    }
+    systemMetricsLastRefreshedAt = Date.now();
+  })();
+  try {
+    return await systemMetricsRefreshPromise;
+  } finally {
+    systemMetricsRefreshPromise = undefined;
+  }
+}
+
+function openLocalConnectionDialog() {
+  const local = usingLocalHotspotOrigin();
+  elements.localConnectionError.textContent = "";
+  elements.localCaFingerprint.textContent = localHotspotStatus.caSha256 || "--";
+  elements.downloadLocalCaButton.hidden = local;
+  elements.localConnectionSteps.hidden = local;
+  elements.localCertificateDetails.hidden = local;
+  elements.localCertificateDetails.open = false;
+  if (local) {
+    const remoteOrigin = localStorage.getItem(REMOTE_ORIGIN_KEY) || "";
+    elements.localConnectionDescription.textContent = remoteOrigin
+      ? "当前正在通过热点局域网直连 Mac；需要时可以切回 Tailscale 地址。"
+      : "当前正在通过热点局域网直连 Mac。";
+    elements.localConnectionSwitch.textContent = "切回远程";
+    elements.localConnectionSwitch.disabled = !remoteOrigin;
+  } else {
+    elements.localConnectionDescription.textContent = localHotspotStatus.active
+      ? "已检测到配置过的手机热点，可绕过远程中继直接连接 Mac。"
+      : "本地入口已配置，但当前网络与手机热点不匹配。";
+    elements.localConnectionSwitch.textContent = "切换到本地";
+    elements.localConnectionSwitch.disabled = !localHotspotStatus.active;
+  }
+  if (!elements.localConnectionDialog.open) {
+    elements.localConnectionDialog.showModal();
+  }
+}
+
+async function downloadLocalCa() {
+  elements.localConnectionError.textContent = "";
+  elements.downloadLocalCaButton.disabled = true;
+  try {
+    const response = await fetch("/api/local-hotspot/ca", {
+      headers: authorizationHeaders(),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("CA unavailable");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "codex-pocket-local-ca.cer";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 2_000);
+  } catch {
+    elements.localConnectionError.textContent = "证书下载失败，请刷新后重试。";
+  } finally {
+    elements.downloadLocalCaButton.disabled = false;
+  }
+}
+
+async function switchLocalConnection() {
+  elements.localConnectionError.textContent = "";
+  if (usingLocalHotspotOrigin()) {
+    const remoteOrigin = localStorage.getItem(REMOTE_ORIGIN_KEY) || "";
+    if (remoteOrigin) window.location.assign(remoteOrigin);
+    return;
+  }
+  if (!localHotspotStatus.active || !localHotspotStatus.url) {
+    elements.localConnectionError.textContent = "当前没有连接已配置的手机热点。";
+    return;
+  }
+  elements.localConnectionSwitch.disabled = true;
+  try {
+    const response = await fetch("/api/devices/handoff-ticket", {
+      method: "POST",
+      headers: authorizationHeaders(),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.pairingTicket) throw new Error("handoff failed");
+    const target = new URL(localHotspotStatus.url);
+    const fragment = new URLSearchParams({
+      pairing: result.pairingTicket,
+      remote: window.location.origin,
+    });
+    target.hash = fragment.toString();
+    window.location.assign(target.toString());
+  } catch {
+    elements.localConnectionError.textContent = "无法创建本地切换票据，请刷新后重试。";
+    elements.localConnectionSwitch.disabled = false;
+  }
+}
+
+function notificationSupportAvailable() {
+  return Boolean(
+    window.isSecureContext
+    && "Notification" in window
+    && "serviceWorker" in navigator,
+  );
+}
+
+function registerNotificationWorker() {
+  if (!notificationSupportAvailable()) return Promise.resolve(undefined);
+  if (!serviceWorkerRegistrationPromise) {
+    serviceWorkerRegistrationPromise = navigator.serviceWorker.register("/sw.js");
+  }
+  return serviceWorkerRegistrationPromise;
+}
+
+function setNotificationButtonState(label) {
+  elements.notificationStatus.textContent = label;
+  elements.notificationButton.title = label;
+  elements.notificationButton.setAttribute("aria-label", `系统通知：${label}`);
+}
+
+function renderNotificationState() {
+  notificationBlockedReason = "";
+  elements.notificationButton.classList.remove("enabled", "blocked");
+  if (!notificationSupportAvailable()) {
+    notificationBlockedReason = "unsupported";
+    elements.notificationButton.classList.add("blocked");
+    setNotificationButtonState("当前浏览器不支持");
+    return;
+  }
+  if (Notification.permission === "denied") {
+    notificationBlockedReason = "permission_denied";
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+    elements.notificationButton.classList.add("blocked");
+    setNotificationButtonState("已被浏览器阻止，请在网站设置中允许");
+    return;
+  }
+  if (notificationsEnabled && Notification.permission !== "granted") {
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+  }
+  if (notificationsEnabled && Notification.permission === "granted") {
+    elements.notificationButton.classList.add("enabled");
+    setNotificationButtonState("已开启 · 页面留在后台即可提醒");
+    return;
+  }
+  setNotificationButtonState(Notification.permission === "granted"
+    ? "已关闭 · 点此开启"
+    : "点此开启");
+}
+
+async function showSystemNotification(title, options = {}) {
+  if (
+    !notificationsEnabled
+    || !notificationSupportAvailable()
+    || Notification.permission !== "granted"
+  ) return;
+  try {
+    const registration = await registerNotificationWorker();
+    if (!registration) return;
+    await registration.showNotification(title, {
+      body: options.body || "",
+      tag: options.tag || "codex-pocket",
+      data: {
+        threadId: options.threadId || "",
+        url: options.threadId
+          ? `/?thread=${encodeURIComponent(options.threadId)}`
+          : "/",
+      },
+    });
+  } catch {
+    // Notification delivery is best effort; task polling must keep running.
+  }
+}
+
+function threadNotificationState(thread) {
+  const activityStatus = String(thread?.activityStatus || "");
+  return {
+    title: String(thread?.title || "未命名任务"),
+    activityStatus,
+    updatedAt: String(thread?.updatedAt || ""),
+    running: activityStatus === "inProgress",
+  };
+}
+
+function observeThreadNotificationStates(nextThreads, { prime = false } = {}) {
+  const nextIds = new Set();
+  for (const thread of nextThreads || []) {
+    if (!thread?.id) continue;
+    const threadId = String(thread.id);
+    nextIds.add(threadId);
+    const next = threadNotificationState(thread);
+    const previous = threadNotificationStates.get(threadId);
+    threadNotificationStates.set(threadId, next);
+    if (prime || !threadNotificationsPrimed || !previous || next.running) {
+      continue;
+    }
+    const observedTerminalTransition = previous.running;
+    const observedNewTerminalUpdate = Boolean(
+      previous.updatedAt
+      && next.updatedAt
+      && previous.updatedAt !== next.updatedAt,
+    );
+    if (!observedTerminalTransition && !observedNewTerminalUpdate) continue;
+    const eventIdentity = next.updatedAt || Date.now();
+    if (next.activityStatus === "completed") {
+      showSystemNotification("Codex 任务已完成", {
+        body: next.title,
+        threadId,
+        tag: `codex-completed-${threadId}-${eventIdentity}`,
+      });
+    } else if (next.activityStatus === "interrupted") {
+      showSystemNotification("Codex 任务已暂停", {
+        body: next.title,
+        threadId,
+        tag: `codex-interrupted-${threadId}-${eventIdentity}`,
+      });
+    } else if (next.activityStatus === "failed") {
+      showSystemNotification("Codex 任务失败", {
+        body: next.title,
+        threadId,
+        tag: `codex-failed-${threadId}-${eventIdentity}`,
+      });
+    }
+  }
+  for (const threadId of threadNotificationStates.keys()) {
+    if (!nextIds.has(threadId)) threadNotificationStates.delete(threadId);
+  }
+  if (prime || !threadNotificationsPrimed) threadNotificationsPrimed = true;
+}
+
+async function toggleSystemNotifications() {
+  if (!notificationSupportAvailable()) {
+    renderNotificationState();
+    elements.notificationHelpMessage.textContent = "当前页面没有可用的安全通知环境。请确认使用 HTTPS，并使用支持系统通知的 Chrome。";
+    if (!elements.notificationHelpDialog.open) {
+      elements.notificationHelpDialog.showModal();
+    }
+    return;
+  }
+  if (Notification.permission === "denied") {
+    renderNotificationState();
+    elements.notificationHelpMessage.textContent = "浏览器已阻止这个本地网址的通知；网页不能自行重新弹出授权框。";
+    if (!elements.notificationHelpDialog.open) {
+      elements.notificationHelpDialog.showModal();
+    }
+    return;
+  }
+  if (notificationsEnabled && Notification.permission === "granted") {
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+    renderNotificationState();
+    return;
+  }
+  let permission = Notification.permission;
+  if (permission === "default") permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+    renderNotificationState();
+    return;
+  }
+  try {
+    await registerNotificationWorker();
+  } catch {
+    notificationBlockedReason = "service_worker_failed";
+    elements.notificationButton.classList.add("blocked");
+    setNotificationButtonState("通知服务注册失败，请刷新后重试");
+    return;
+  }
+  notificationsEnabled = true;
+  localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, "true");
+  observeThreadNotificationStates(threads, { prime: true });
+  renderNotificationState();
+  await showSystemNotification("Codex Pocket 通知已开启", {
+    body: "任务完成、暂停或需要确认时会提醒你。",
+    tag: "codex-notifications-enabled",
+  });
 }
 
 function defaultDeviceName() {
@@ -164,11 +625,43 @@ function openDrawer() {
   elements.drawerScrim.hidden = false;
   refreshDrawerThreadStates();
   refreshUsage();
+  refreshSystemMetrics();
 }
 
 function closeDrawer() {
   elements.projectDrawer.classList.remove("open");
   elements.drawerScrim.hidden = true;
+}
+
+function updateProjectsHint() {
+  const projectCount = projects.length;
+  const recentCount = threads.filter(
+    (thread) => thread.collection !== "project",
+  ).length;
+  elements.projectsHint.textContent = threads.length
+    ? `${projectCount} 个项目 · ${recentCount} 个最近任务`
+    : "没有找到持久化任务";
+}
+
+function reconcileThreadCatalog(result) {
+  if (!Array.isArray(result.projects) || !Array.isArray(result.threads)) return false;
+  observeThreadNotificationStates(result.threads, {
+    prime: !threadNotificationsPrimed,
+  });
+  projects = result.projects;
+  const existing = new Map(threads.map((thread) => [thread.id, thread]));
+  threads = result.threads.map((update) => {
+    const current = existing.get(update.id);
+    if (!current) return update;
+    Object.assign(current, update);
+    return current;
+  });
+  if (selectedThread?.id) {
+    selectedThread = threads.find((thread) => thread.id === selectedThread.id)
+      || selectedThread;
+  }
+  updateProjectsHint();
+  return true;
 }
 
 async function refreshDrawerThreadStates() {
@@ -181,15 +674,8 @@ async function refreshDrawerThreadStates() {
       });
       if (!response.ok) return;
       const result = await response.json();
-      projects = result.projects || projects;
-      const updates = new Map(
-        (result.threads || []).map((thread) => [thread.id, thread]),
-      );
-      for (const thread of threads) {
-        const update = updates.get(thread.id);
-        if (update) Object.assign(thread, update);
-      }
-      renderProjectGroups();
+      if (!reconcileThreadCatalog(result)) return;
+      if (elements.projectDrawer.classList.contains("open")) renderProjectGroups();
     } catch {
       // Keep the last known drawer state; the main status indicator reports outages.
     }
@@ -526,6 +1012,140 @@ function setComposerDisabled(disabled) {
   }
 }
 
+function attachmentsForThread(threadId) {
+  return threadId ? (threadAttachments.get(threadId) || []) : [];
+}
+
+function selectedAttachments() {
+  return attachmentsForThread(selectedThread?.id);
+}
+
+function composerHasContent() {
+  return Boolean(elements.composerInput.value.trim() || selectedAttachments().length);
+}
+
+function formatAttachmentSize(bytes) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function removeAttachment(threadId, attachmentId) {
+  const attachments = attachmentsForThread(threadId);
+  const attachment = attachments.find((item) => item.id === attachmentId);
+  if (!attachment) return;
+  attachment.removing = true;
+  renderComposerAttachments();
+  try {
+    const response = await fetch(
+      `/api/attachments/${encodeURIComponent(attachmentId)}`,
+      { method: "DELETE", headers: authorizationHeaders() },
+    );
+    if (response.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+    if (!response.ok && response.status !== 404) throw new Error("delete failed");
+    const remaining = attachments.filter((item) => item.id !== attachmentId);
+    if (remaining.length) threadAttachments.set(threadId, remaining);
+    else threadAttachments.delete(threadId);
+  } catch {
+    attachment.removing = false;
+    if (selectedThread?.id === threadId) {
+      elements.composerState.textContent = "附件移除失败，请稍后重试";
+    }
+  }
+  renderComposerAttachments();
+  updateComposerState();
+}
+
+function renderComposerAttachments() {
+  const attachments = selectedAttachments();
+  elements.composerAttachments.replaceChildren();
+  elements.composerAttachments.hidden = attachments.length === 0;
+  for (const attachment of attachments) {
+    const chip = document.createElement("div");
+    chip.className = "attachment-chip";
+    chip.title = `${attachment.name} · ${formatAttachmentSize(attachment.size)}`;
+    const name = document.createElement("span");
+    name.className = "attachment-chip-name";
+    name.textContent = attachment.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-chip-remove";
+    remove.textContent = "×";
+    remove.disabled = Boolean(attachment.removing || isSendingMessage);
+    remove.setAttribute("aria-label", `移除附件 ${attachment.name}`);
+    remove.addEventListener("click", () => {
+      removeAttachment(selectedThread?.id, attachment.id);
+    });
+    chip.append(name, remove);
+    elements.composerAttachments.append(chip);
+  }
+  resizeComposer();
+}
+
+async function uploadSelectedAttachments(files) {
+  if (!selectedThread || isUploadingAttachments || !files.length) return;
+  const threadId = selectedThread.id;
+  const existing = attachmentsForThread(threadId);
+  const availableSlots = MAX_ATTACHMENTS_PER_TURN - existing.length;
+  const selectedFiles = Array.from(files).slice(0, Math.max(0, availableSlots));
+  if (!selectedFiles.length) {
+    elements.composerState.textContent = `每条指令最多 ${MAX_ATTACHMENTS_PER_TURN} 个附件`;
+    return;
+  }
+  isUploadingAttachments = true;
+  updateComposerState();
+  let feedback = "";
+  for (const file of selectedFiles) {
+    if (!file.size || file.size > MAX_ATTACHMENT_BYTES) {
+      feedback = `${file.name} 超过 20 MB 或为空文件`;
+      continue;
+    }
+    try {
+      if (selectedThread?.id === threadId) {
+        elements.composerState.textContent = `正在上传 ${file.name}…`;
+      }
+      const response = await fetch("/api/attachments", {
+        method: "POST",
+        headers: {
+          ...authorizationHeaders(),
+          "Content-Type": file.type || "application/octet-stream",
+          "X-Codex-Filename": encodeURIComponent(file.name),
+        },
+        body: file,
+      });
+      if (response.status === 401) {
+        handleUnauthorized();
+        feedback = "设备授权已失效，请重新配对";
+        break;
+      }
+      const result = await response.json();
+      if (!response.ok || !result.attachment) {
+        feedback = response.status === 413
+          ? `${file.name} 超过 20 MB`
+          : `${file.name} 上传失败`;
+        continue;
+      }
+      threadAttachments.set(threadId, [
+        ...attachmentsForThread(threadId),
+        result.attachment,
+      ]);
+      if (selectedThread?.id === threadId) renderComposerAttachments();
+    } catch {
+      feedback = `${file.name} 上传失败`;
+    }
+  }
+  isUploadingAttachments = false;
+  elements.attachmentInput.value = "";
+  renderComposerAttachments();
+  updateComposerState();
+  if (feedback && selectedThread?.id === threadId) {
+    elements.composerState.textContent = feedback;
+  }
+}
+
 function resizeComposer() {
   const viewportHeight = window.visualViewport?.height || window.innerHeight;
   const maxHeight = Math.min(180, Math.max(96, viewportHeight * 0.3));
@@ -666,16 +1286,39 @@ function conversationNearBottom(threshold = 140) {
 }
 
 function hideNewContentNotice() {
+  hasUnseenNewContent = false;
   elements.newContentButton.hidden = true;
 }
 
 function showNewContentNotice() {
-  if (selectedThread) elements.newContentButton.hidden = false;
+  hasUnseenNewContent = true;
+  updateLatestButton();
+}
+
+function updateLatestButton() {
+  const shouldShow = Boolean(
+    selectedThread
+    && !isScrollingToLatest
+    && !conversationNearBottom()
+  );
+  elements.newContentButton.hidden = !shouldShow;
+  elements.latestButtonLabel.textContent = hasUnseenNewContent
+    ? "下方有新内容"
+    : "回到最新";
+  elements.newContentButton.classList.toggle("has-new-content", hasUnseenNewContent);
+  elements.newContentButton.title = hasUnseenNewContent
+    ? "查看下方的新内容"
+    : "回到对话最下面";
 }
 
 function scrollToLatest(behavior = "smooth") {
   hideNewContentNotice();
+  isScrollingToLatest = true;
   window.scrollTo({ top: document.body.scrollHeight, behavior });
+  window.setTimeout(() => {
+    isScrollingToLatest = false;
+    updateLatestButton();
+  }, behavior === "smooth" ? 500 : 0);
 }
 
 function followLatestOrNotify(wasNearBottom) {
@@ -696,7 +1339,6 @@ function followLatestOrNotify(wasNearBottom) {
 function threadContentSignature(thread) {
   return JSON.stringify({
     activityStatus: thread.activityStatus,
-    updatedAt: thread.updatedAt,
     turns: (thread.turns || []).slice(-3).map((turn) => ({
       id: turn.id,
       status: turn.status,
@@ -709,6 +1351,7 @@ function threadContentSignature(thread) {
         text: item.text,
         label: item.label,
         count: item.count,
+        attachments: item.attachments,
       })),
     })),
   });
@@ -822,6 +1465,7 @@ function updateComposerState() {
   const hasActiveTurn = selectedThreadHasActiveTurn();
   const isPaused = selectedThreadIsPaused();
   const isComplete = selectedThreadIsComplete();
+  const hasComposerContent = composerHasContent();
   let badgeKind = "history";
   let badgeLabel = "历史";
   let dotKind = "";
@@ -858,7 +1502,7 @@ function updateComposerState() {
   let actionIsStop = false;
   let actionIsContinue = false;
   let actionDisabled = true;
-  let inputDisabled = !selectedThread || isSendingMessage;
+  let inputDisabled = !selectedThread || isSendingMessage || isUploadingAttachments;
   if (!selectedThread) {
     modeText = "只读历史";
   } else if (isSendingMessage) {
@@ -883,33 +1527,31 @@ function updateComposerState() {
     || (isDesktopThread && currentStopCandidates === 1)
   ) {
     modeText = "Desktop · 运行中";
-    if (isDesktopThread && currentStopCandidates === 1) {
-      stateText = "Mac 任务运行中 · 点红色按钮可停止";
-      actionIsStop = true;
-      actionDisabled = false;
-    } else if (selectedThreadLastTurnStatus === "waitingForInput") {
-      stateText = "任务运行中 · 正在等待你的确认";
-    } else if (selectedThreadLastTurnStatus === "interrupting") {
+    if (selectedThreadLastTurnStatus === "interrupting") {
       stateText = "正在停止 Desktop 任务…";
     } else {
-      stateText = "Mac 任务运行中 · 正在同步可停止状态";
+      stateText = isDesktopThread && currentStopCandidates === 1
+        ? "Mac 任务运行中 · 点红色按钮可停止"
+        : "任务正在 Mac 上运行 · 点红色按钮可切换并停止";
+      actionIsStop = true;
+      actionDisabled = false;
     }
   } else if (isPaused) {
     stateText = "任务已暂停 · 留空可继续，也可输入新指令";
     modeText = `${isDesktopThread ? "Desktop" : "历史"} · 已暂停`;
-    actionIsContinue = !elements.composerInput.value.trim();
+    actionIsContinue = !hasComposerContent;
     actionDisabled = false;
   } else if (isComplete) {
     stateText = "任务已完成 · 可以继续发送新指令";
     modeText = `${isDesktopThread ? "Desktop" : "历史"} · 已完成`;
-    actionDisabled = !elements.composerInput.value.trim();
+    actionDisabled = !hasComposerContent;
   } else if (isDesktopThread) {
     modeText = "Desktop";
     stateText = currentStopCandidates < 0
       ? "Desktop 状态暂时不可用 · 暂不允许发送"
       : "正在核对任务状态 · 暂不允许发送";
   } else {
-    actionDisabled = !elements.composerInput.value.trim();
+    actionDisabled = !hasComposerContent;
     if (managedForSelected && managedRun?.status === "failed") {
       stateText = `上个任务失败：${managedRun.error || "未知错误"}`;
       modeText = "Managed · 失败";
@@ -943,8 +1585,27 @@ function updateComposerState() {
     || (isDesktopThread && currentStopCandidates === 1)
     || modelSettingsLoadingThreadId === selectedThread.id
   );
+  elements.attachmentButton.disabled = Boolean(
+    !selectedThread
+    || isSendingMessage
+    || isUploadingAttachments
+    || selectedAttachments().length >= MAX_ATTACHMENTS_PER_TURN
+  );
+  if (isUploadingAttachments && !actionIsStop) {
+    elements.composerActionButton.disabled = true;
+  }
   renderModelSettingsButton();
   setComposerDisabled(inputDisabled);
+}
+
+function drawerThreadIsRunning(thread, liveThreadId) {
+  return Boolean(
+    thread.activityStatus === "inProgress"
+    || (
+      thread.id === liveThreadId
+      && (currentStopCandidates === 1 || desktopActivityIsRecent())
+    )
+  );
 }
 
 function createThreadButton(thread, liveThreadId, isRecent = false) {
@@ -957,13 +1618,7 @@ function createThreadButton(thread, liveThreadId, isRecent = false) {
   title.className = "drawer-thread-title";
   title.textContent = thread.title;
   button.append(title);
-  const isRunning = (
-    thread.activityStatus === "inProgress"
-    || (
-      thread.id === liveThreadId
-      && (currentStopCandidates === 1 || desktopActivityIsRecent())
-    )
-  );
+  const isRunning = drawerThreadIsRunning(thread, liveThreadId);
   const isComplete = !isRunning && thread.activityStatus === "completed";
   if (isRunning || isComplete) {
     const state = document.createElement("span");
@@ -980,6 +1635,31 @@ function createThreadButton(thread, liveThreadId, isRecent = false) {
   return button;
 }
 
+function createSafeThreadButton(thread, liveThreadId, isRecent = false) {
+  try {
+    return createThreadButton(thread, liveThreadId, isRecent);
+  } catch {
+    // A partially-written Desktop catalog entry must not prevent every later
+    // project and Recent task from rendering. Keep the task reachable with the
+    // stable fields that are available and let the next catalog refresh repair
+    // its richer state.
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "drawer-thread";
+    if (isRecent) button.classList.add("recent-thread");
+    const title = document.createElement("span");
+    title.className = "drawer-thread-title";
+    title.textContent = String(thread?.title || "未命名任务");
+    button.append(title);
+    if (typeof thread?.id === "string" && thread.id) {
+      button.addEventListener("click", () => openThread(thread.id));
+    } else {
+      button.disabled = true;
+    }
+    return button;
+  }
+}
+
 function saveCollapsedProjects() {
   localStorage.setItem(
     COLLAPSED_PROJECTS_KEY,
@@ -988,7 +1668,7 @@ function saveCollapsedProjects() {
 }
 
 function newTaskCreationDisabled() {
-  return isCreatingTask || !desktopStatusKnown || currentStopCandidates !== 0;
+  return isCreatingTask;
 }
 
 function createCollectionNewTaskButton(target) {
@@ -1000,14 +1680,139 @@ function createCollectionNewTaskButton(target) {
   const destination = target.projectId ? target.name : "Recents";
   button.setAttribute("aria-label", `在 ${destination} 中新建任务`);
   button.title = newTaskCreationDisabled()
-    ? "Mac 空闲后可以新建任务"
+    ? "正在创建另一个任务"
     : `在 ${destination} 中新建任务`;
   button.addEventListener("click", () => openNewTaskDialog(target));
   return button;
 }
 
+function updateNewTaskControls() {
+  const busy = isCreatingTask || isUploadingNewTaskAttachments;
+  elements.newTaskAttachmentButton.disabled = Boolean(
+    busy || newTaskAttachments.length >= MAX_ATTACHMENTS_PER_TURN
+  );
+  elements.newTaskSubmit.disabled = busy;
+  elements.newTaskCancel.disabled = busy;
+}
+
+function renderNewTaskAttachments() {
+  elements.newTaskAttachments.replaceChildren();
+  elements.newTaskAttachments.hidden = newTaskAttachments.length === 0;
+  for (const attachment of newTaskAttachments) {
+    const chip = document.createElement("div");
+    chip.className = "attachment-chip";
+    chip.title = `${attachment.name} · ${formatAttachmentSize(attachment.size)}`;
+    const name = document.createElement("span");
+    name.className = "attachment-chip-name";
+    name.textContent = attachment.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "attachment-chip-remove";
+    remove.textContent = "×";
+    remove.disabled = Boolean(attachment.removing || isCreatingTask);
+    remove.setAttribute("aria-label", `移除附件 ${attachment.name}`);
+    remove.addEventListener("click", () => removeNewTaskAttachment(attachment.id));
+    chip.append(name, remove);
+    elements.newTaskAttachments.append(chip);
+  }
+  updateNewTaskControls();
+}
+
+async function removeNewTaskAttachment(attachmentId) {
+  const attachment = newTaskAttachments.find((item) => item.id === attachmentId);
+  if (!attachment || isCreatingTask) return;
+  attachment.removing = true;
+  renderNewTaskAttachments();
+  try {
+    const response = await fetch(
+      `/api/attachments/${encodeURIComponent(attachmentId)}`,
+      { method: "DELETE", headers: authorizationHeaders() },
+    );
+    if (response.status === 401) {
+      handleUnauthorized();
+      return;
+    }
+    if (!response.ok && response.status !== 404) throw new Error("delete failed");
+    newTaskAttachments = newTaskAttachments.filter(
+      (item) => item.id !== attachmentId,
+    );
+  } catch {
+    attachment.removing = false;
+    elements.newTaskError.textContent = "附件移除失败，请稍后重试。";
+  }
+  renderNewTaskAttachments();
+}
+
+function discardNewTaskAttachments() {
+  const discarded = newTaskAttachments;
+  newTaskAttachments = [];
+  renderNewTaskAttachments();
+  for (const attachment of discarded) {
+    fetch(`/api/attachments/${encodeURIComponent(attachment.id)}`, {
+      method: "DELETE",
+      headers: authorizationHeaders(),
+    }).catch(() => {});
+  }
+}
+
+async function uploadNewTaskAttachments(files) {
+  if (isCreatingTask || isUploadingNewTaskAttachments || !files.length) return;
+  const availableSlots = MAX_ATTACHMENTS_PER_TURN - newTaskAttachments.length;
+  const selectedFiles = Array.from(files).slice(0, Math.max(0, availableSlots));
+  if (!selectedFiles.length) {
+    elements.newTaskError.textContent = `每个新任务最多 ${MAX_ATTACHMENTS_PER_TURN} 个附件。`;
+    return;
+  }
+  isUploadingNewTaskAttachments = true;
+  elements.newTaskError.textContent = "";
+  updateNewTaskControls();
+  let feedback = "";
+  try {
+    for (const file of selectedFiles) {
+      if (!file.size || file.size > MAX_ATTACHMENT_BYTES) {
+        feedback = `${file.name} 超过 20 MB 或为空文件。`;
+        continue;
+      }
+      elements.newTaskError.textContent = `正在上传 ${file.name}…`;
+      try {
+        const response = await fetch("/api/attachments", {
+          method: "POST",
+          headers: {
+            ...authorizationHeaders(),
+            "Content-Type": file.type || "application/octet-stream",
+            "X-Codex-Filename": encodeURIComponent(file.name),
+          },
+          body: file,
+        });
+        if (response.status === 401) {
+          handleUnauthorized();
+          feedback = "设备授权已失效，请重新配对。";
+          break;
+        }
+        const result = await response.json();
+        if (!response.ok || !result.attachment) {
+          feedback = response.status === 413
+            ? `${file.name} 超过 20 MB。`
+            : `${file.name} 上传失败。`;
+          continue;
+        }
+        newTaskAttachments.push(result.attachment);
+        renderNewTaskAttachments();
+      } catch {
+        feedback = `${file.name} 上传失败。`;
+      }
+    }
+  } finally {
+    isUploadingNewTaskAttachments = false;
+    elements.newTaskAttachmentInput.value = "";
+    renderNewTaskAttachments();
+    elements.newTaskError.textContent = feedback;
+  }
+}
+
 function openNewTaskDialog(target) {
   if (newTaskCreationDisabled()) return;
+  if (newTaskAttachments.length) discardNewTaskAttachments();
   newTaskTarget = target;
   elements.newTaskDestination.textContent = target.projectId
     ? `Project「${target.name}」`
@@ -1029,8 +1834,8 @@ function openNewTaskDialog(target) {
 async function createNewTask() {
   if (!newTaskTarget || isCreatingTask) return;
   const message = elements.newTaskMessage.value.trim();
-  if (!message) {
-    elements.newTaskError.textContent = "请输入第一条指令。";
+  if (!message && !newTaskAttachments.length) {
+    elements.newTaskError.textContent = "请输入第一条指令或添加附件。";
     return;
   }
   const sourceEntry = selectedThread
@@ -1040,15 +1845,20 @@ async function createNewTask() {
   const body = {
     projectId: newTaskTarget.projectId || null,
     message,
+    attachmentIds: newTaskAttachments.map((attachment) => attachment.id),
   };
   if (sourceSettings?.model && sourceSettings?.effort) {
     Object.assign(body, sourceSettings);
   }
   isCreatingTask = true;
-  elements.newTaskSubmit.disabled = true;
-  elements.newTaskCancel.disabled = true;
+  updateNewTaskControls();
   elements.newTaskError.textContent = "正在 Mac 上创建并发送…";
   renderProjectGroups();
+  const requestController = new AbortController();
+  const requestTimeout = window.setTimeout(
+    () => requestController.abort(),
+    newTaskAttachments.length ? 45_000 : 20_000,
+  );
   try {
     const response = await fetch("/api/codex/threads", {
       method: "POST",
@@ -1057,6 +1867,7 @@ async function createNewTask() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal: requestController.signal,
     });
     if (response.status === 401) {
       handleUnauthorized();
@@ -1065,23 +1876,46 @@ async function createNewTask() {
     const result = await response.json();
     if (!response.ok) {
       if (result.threadCreated && result.threadId) {
-        threadDrafts.set(result.threadId, message);
+        if (message) threadDrafts.set(result.threadId, message);
+        if (newTaskAttachments.length) {
+          threadAttachments.set(result.threadId, [...newTaskAttachments]);
+        }
+        newTaskAttachments = [];
+        renderNewTaskAttachments();
         localStorage.setItem(SELECTED_THREAD_KEY, result.threadId);
         elements.newTaskDialog.close();
         await loadThreads();
-        elements.composerState.textContent = "任务已创建，但 Desktop 没有确认发送；指令已保留，可重试。";
+        if (
+          result.thread?.id
+          && !threads.some((thread) => thread.id === result.thread.id)
+        ) {
+          threads = [result.thread, ...threads];
+          renderProjectGroups();
+        }
+        if (threads.some((thread) => thread.id === result.threadId)) {
+          await openThread(result.threadId, {
+            scroll: true,
+            refreshRun: false,
+          });
+        }
+        const dispatchMessages = {
+          desktop_accessibility_unavailable: "空任务已创建，但后台 Helper 的辅助功能授权已失效；请在 Mac 上重新开关授权后重试。",
+          desktop_attachment_unconfirmed: "空任务已创建，但 Desktop 没有确认附件；指令和附件已保留，可重试。",
+        };
+        elements.composerState.textContent = dispatchMessages[result.error]
+          || "任务已创建，但 Desktop 没有确认发送；指令已保留，可重试。";
         return;
       }
       const messages = {
-        desktop_turn_active: "Mac 上已有任务在运行，请完成或停止后再创建。",
-        desktop_state_unavailable: "暂时无法确认 Mac 是否空闲。",
+        desktop_turn_active: "新任务自身已经开始运行，请刷新列表确认状态。",
         invalid_project: "这个 Project 已发生变化，请刷新列表。",
         project_path_missing: "这个 Project 没有可用的本地目录。",
+        projectless_directory_failed: "无法创建 Recents 的独立工作目录。",
         invalid_model_settings: "当前模型设置不可用于新任务。",
         thread_create_failed: "Desktop 没有成功创建任务，请稍后重试。",
       };
       elements.newTaskError.textContent = messages[result.error] || "新任务没有创建，请稍后重试。";
-      if (result.error === "desktop_turn_active" || result.error === "desktop_state_unavailable") {
+      if (result.error === "desktop_turn_active") {
         await refreshStatus();
       }
       return;
@@ -1108,6 +1942,8 @@ async function createNewTask() {
       startedAt: Date.now(),
     };
     localStorage.setItem(SELECTED_THREAD_KEY, createdThread.id);
+    newTaskAttachments = [];
+    renderNewTaskAttachments();
     elements.newTaskDialog.close();
     await openThread(createdThread.id, { fresh: true, closeDrawer: true });
     updateComposerState();
@@ -1115,9 +1951,9 @@ async function createNewTask() {
   } catch {
     elements.newTaskError.textContent = "无法连接 Mac，请稍后重试。";
   } finally {
+    window.clearTimeout(requestTimeout);
     isCreatingTask = false;
-    elements.newTaskSubmit.disabled = false;
-    elements.newTaskCancel.disabled = false;
+    updateNewTaskControls();
     renderProjectGroups();
   }
 }
@@ -1185,18 +2021,6 @@ function renderProjectGroups() {
     label.textContent = group.name;
     heading.append(chevron, folder, label);
 
-    const body = document.createElement("div");
-    body.className = "project-body";
-    if (group.path) {
-      const path = document.createElement("span");
-      path.className = "project-path";
-      path.textContent = group.path;
-      path.title = group.path;
-      body.append(path);
-    }
-    for (const thread of group.threads) {
-      body.append(createThreadButton(thread, liveThreadId));
-    }
     heading.addEventListener("click", () => {
       const collapsed = section.classList.toggle("collapsed");
       heading.setAttribute("aria-expanded", String(!collapsed));
@@ -1207,12 +2031,69 @@ function renderProjectGroups() {
       }
       saveCollapsedProjects();
     });
-    headingRow.append(
-      heading,
-      createCollectionNewTaskButton({ projectId: group.id, name: group.name }),
-    );
-    section.append(headingRow, body);
+    headingRow.append(heading);
+    try {
+      headingRow.append(createCollectionNewTaskButton({
+        projectId: group.id,
+        name: group.name,
+      }));
+    } catch {
+      // The project remains navigable even if its transient action state is bad.
+    }
+    section.append(headingRow);
     elements.projectGroups.append(section);
+
+    const body = document.createElement("div");
+    body.className = "project-body";
+    if (group.path) {
+      const path = document.createElement("span");
+      path.className = "project-path";
+      path.textContent = String(group.path);
+      path.title = String(group.path);
+      body.append(path);
+    }
+    const overflowRows = [];
+    const listExpanded = expandedProjectThreadLists.has(group.id);
+    for (let index = 0; index < group.threads.length; index += 1) {
+      const thread = group.threads[index];
+      const row = createSafeThreadButton(thread, liveThreadId);
+      const belongsInOverflow = Boolean(
+        index >= PROJECT_THREAD_PREVIEW_LIMIT
+        && thread.id !== selectedThread?.id
+        && !drawerThreadIsRunning(thread, liveThreadId)
+      );
+      if (belongsInOverflow) {
+        row.classList.add("project-thread-overflow");
+        row.hidden = !listExpanded;
+        overflowRows.push(row);
+      }
+      body.append(row);
+    }
+    if (overflowRows.length) {
+      const showMore = document.createElement("button");
+      showMore.type = "button";
+      showMore.className = "project-show-more";
+      const updateShowMore = (expanded) => {
+        showMore.textContent = expanded ? "Show less" : "Show more";
+        showMore.setAttribute("aria-expanded", String(expanded));
+        showMore.setAttribute(
+          "aria-label",
+          expanded
+            ? `收起 ${group.name} 的较早任务`
+            : `显示 ${group.name} 的另外 ${overflowRows.length} 个任务`,
+        );
+        for (const row of overflowRows) row.hidden = !expanded;
+      };
+      updateShowMore(listExpanded);
+      showMore.addEventListener("click", () => {
+        const expanded = !expandedProjectThreadLists.has(group.id);
+        if (expanded) expandedProjectThreadLists.add(group.id);
+        else expandedProjectThreadLists.delete(group.id);
+        updateShowMore(expanded);
+      });
+      body.append(showMore);
+    }
+    section.append(body);
   }
 
   const section = document.createElement("section");
@@ -1228,7 +2109,7 @@ function renderProjectGroups() {
   );
   section.append(headingRow);
   for (const thread of recentThreads) {
-    section.append(createThreadButton(thread, liveThreadId, true));
+    section.append(createSafeThreadButton(thread, liveThreadId, true));
   }
   elements.projectGroups.append(section);
 }
@@ -1787,16 +2668,34 @@ function appendTurnHistory(turn, groupKey, target = elements.threadHistory) {
   const workedItems = items.filter((item, index) => (
     item.type !== "userMessage" && index !== finalAnswerIndex
   ));
-  let workedAppended = false;
-  for (let index = 0; index < items.length; index += 1) {
-    const item = items[index];
-    if (item.type === "userMessage" || index === finalAnswerIndex) {
-      appendHistoryItem(item, target);
-    } else if (!workedAppended) {
-      appendWorkedGroup(workedItems, turn, groupKey, target);
-      workedAppended = true;
+  let lastUserIndex = -1;
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (items[index].type === "userMessage") {
+      lastUserIndex = index;
+      break;
     }
   }
+  let workedAppended = false;
+  const appendWorked = () => {
+    if (workedAppended) return;
+    appendWorkedGroup(workedItems, turn, groupKey, target);
+    workedAppended = true;
+  };
+  for (let index = 0; index < items.length; index += 1) {
+    const item = items[index];
+    if (item.type === "userMessage") {
+      appendHistoryItem(item, target);
+    } else if (index === finalAnswerIndex) {
+      appendWorked();
+      appendHistoryItem(item, target);
+    } else if (lastUserIndex < 0 || index > lastUserIndex) {
+      // Codex can record a context-compaction item before the user message that
+      // started the turn. Keep the whole Working/Worked section after the user
+      // block, matching Desktop's visual turn order.
+      appendWorked();
+    }
+  }
+  appendWorked();
 }
 
 function appendHistoryItem(item, target = elements.threadHistory) {
@@ -1811,7 +2710,11 @@ function appendHistoryItem(item, target = elements.threadHistory) {
   if (item.type === "userMessage") {
     label.textContent = "你";
     text.classList.add("plain-text");
-    text.textContent = item.text || "（空消息）";
+    text.textContent = item.text || (
+      Array.isArray(item.attachments) && item.attachments.length
+        ? "（仅附件）"
+        : "（空消息）"
+    );
   } else if (item.type === "agentMessage") {
     label.textContent = item.phase === "final_answer"
       ? "Codex · 最终回复"
@@ -1823,30 +2726,164 @@ function appendHistoryItem(item, target = elements.threadHistory) {
     text.classList.add("plain-text");
     text.textContent = item.label || item.status || "";
   }
-  card.append(label, text);
+  if (
+    item.timestamp
+    && (
+      item.type === "userMessage"
+      || (item.type === "agentMessage" && item.phase === "final_answer")
+    )
+  ) {
+    const milliseconds = timestampMilliseconds(item.timestamp);
+    if (Number.isFinite(milliseconds)) {
+      const date = new Date(milliseconds);
+      const now = new Date();
+      const sameDay = (
+        date.getFullYear() === now.getFullYear()
+        && date.getMonth() === now.getMonth()
+        && date.getDate() === now.getDate()
+      );
+      const timestamp = document.createElement("time");
+      timestamp.className = "history-timestamp";
+      timestamp.dateTime = date.toISOString();
+      timestamp.textContent = new Intl.DateTimeFormat("zh-CN", {
+        ...(sameDay
+          ? {}
+          : {
+            ...(date.getFullYear() === now.getFullYear()
+              ? {}
+              : { year: "numeric" }),
+            month: "numeric",
+            day: "numeric",
+          }),
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).format(date);
+      label.append(timestamp);
+    }
+  }
+  card.append(label);
+  if (item.type === "userMessage" && Array.isArray(item.attachments)) {
+    const attachments = document.createElement("div");
+    attachments.className = "history-message-attachments";
+    for (const attachment of item.attachments) {
+      if (
+        attachment?.type !== "image"
+      ) continue;
+      const row = document.createElement("div");
+      row.className = "history-message-attachment";
+      const name = document.createElement("strong");
+      name.textContent = attachment.name || "图片";
+      const path = document.createElement("code");
+      path.textContent = attachment.path || "本机附件";
+      row.append(name, path);
+      attachments.append(row);
+    }
+    if (attachments.childElementCount) card.append(attachments);
+  }
+  card.append(text);
   target.append(card);
 }
 
 function cachedThreadDetail(summary, turnLimit) {
-  const cached = threadHistoryCache.get(summary.id);
-  if (
-    !cached
-    || String(cached.updatedAt || "") !== String(summary.updatedAt || "")
-    || cached.turnLimit < turnLimit
-  ) return undefined;
+  let cached = threadHistoryCache.get(summary.id);
+  if (!cached) {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(THREAD_SESSION_CACHE_KEY) || "null");
+      if (
+        stored?.version === 1
+        && stored.threadId === summary.id
+        && stored.thread?.id === summary.id
+        && Array.isArray(stored.thread.turns)
+      ) {
+        cached = stored;
+        threadHistoryCache.set(summary.id, cached);
+      }
+    } catch {
+      // Storage can be unavailable in hardened/private browser modes.
+    }
+  }
+  if (!cached) return undefined;
   return cached;
 }
 
-function rememberThreadDetail(summary, thread, turnLimit) {
-  threadHistoryCache.set(summary.id, {
-    updatedAt: summary.updatedAt,
+function persistSessionThreadDetail(entry) {
+  const turns = Array.isArray(entry.thread?.turns) ? entry.thread.turns : [];
+  let retainedTurns = turns;
+  let complete = entry.complete !== false;
+  let serialized = "";
+  do {
+    const thread = {
+      ...entry.thread,
+      turns: retainedTurns,
+    };
+    if (retainedTurns.length !== turns.length) {
+      complete = false;
+      delete thread.historyCursor;
+    }
+    serialized = JSON.stringify({
+      version: 1,
+      ...entry,
+      complete,
+      turnLimit: complete
+        ? entry.turnLimit
+        : Math.min(entry.turnLimit, retainedTurns.length),
+      thread,
+    });
+    if (serialized.length <= THREAD_SESSION_CACHE_MAX_CHARS) break;
+    retainedTurns = retainedTurns.slice(1);
+  } while (retainedTurns.length);
+  try {
+    if (serialized && serialized.length <= THREAD_SESSION_CACHE_MAX_CHARS) {
+      sessionStorage.setItem(THREAD_SESSION_CACHE_KEY, serialized);
+    } else {
+      sessionStorage.removeItem(THREAD_SESSION_CACHE_KEY);
+    }
+  } catch {
+    // The in-memory cache still keeps the current page usable.
+  }
+}
+
+function rememberThreadDetail(summary, thread, turnLimit, complete = true) {
+  const entry = {
+    version: 1,
+    threadId: summary.id,
+    updatedAt: thread.updatedAt ?? summary.updatedAt,
     turnLimit,
     fetchedAt: Date.now(),
     thread,
-  });
+    complete,
+  };
+  threadHistoryCache.set(summary.id, entry);
+  persistSessionThreadDetail(entry);
   while (threadHistoryCache.size > 8) {
     threadHistoryCache.delete(threadHistoryCache.keys().next().value);
   }
+}
+
+function mergeIncrementalThreadDetail(cached, incoming) {
+  const delta = incoming?.historyDelta;
+  if (!delta) return { thread: incoming, complete: true };
+  if (!cached?.thread || cached.complete === false) return undefined;
+  const existingTurns = Array.isArray(cached.thread.turns)
+    ? cached.thread.turns
+    : [];
+  const baseIndex = existingTurns.findIndex(
+    (turn) => String(turn?.id || "") === String(delta.baseTurnId || ""),
+  );
+  if (baseIndex < 0) return undefined;
+  const incomingTurns = Array.isArray(incoming.turns) ? incoming.turns : [];
+  const mergedTurns = delta.mode === "append"
+    ? [...existingTurns.slice(0, baseIndex + 1), ...incomingTurns]
+    : [...existingTurns.slice(0, baseIndex), ...incomingTurns];
+  const historyLimit = Math.max(1, Number(incoming.historyLimit) || cached.turnLimit || 1);
+  const thread = {
+    ...cached.thread,
+    ...incoming,
+    turns: mergedTurns.slice(-historyLimit),
+  };
+  delete thread.historyDelta;
+  return { thread, complete: true };
 }
 
 function renderHistoryNotice(thread, turnLimit) {
@@ -1883,7 +2920,13 @@ function renderThreadDetail(thread, turnLimit, options = {}) {
     previousContentSignature
     && previousContentSignature !== nextContentSignature
   );
+  const shouldRebuildHistory = Boolean(
+    renderedThreadId !== thread.id
+    || !elements.threadHistory.childElementCount
+    || previousContentSignature !== nextContentSignature
+  );
   renderedThreadSignatures.set(thread.id, nextContentSignature);
+  renderedThreadId = thread.id;
   const summary = threads.find((candidate) => candidate.id === thread.id);
   const previousActivityStatus = summary?.activityStatus || "";
   if (summary) summary.activityStatus = String(thread.activityStatus || "");
@@ -1934,15 +2977,17 @@ function renderThreadDetail(thread, turnLimit, options = {}) {
     );
     if (terminalUpdateArrived) desktopActivityEvidence = undefined;
   }
-  const history = document.createDocumentFragment();
-  const visibleTurns = (thread.turns || []).slice(-turnLimit);
-  const firstVisibleIndex = Math.max(0, (thread.turns || []).length - visibleTurns.length);
-  for (let index = 0; index < visibleTurns.length; index += 1) {
-    const turn = visibleTurns[index];
-    const turnIdentity = turn.id || turn.startedAt || `turn-${firstVisibleIndex + index}`;
-    appendTurnHistory(turn, `${thread.id}:${turnIdentity}`, history);
+  if (shouldRebuildHistory) {
+    const history = document.createDocumentFragment();
+    const visibleTurns = (thread.turns || []).slice(-turnLimit);
+    const firstVisibleIndex = Math.max(0, (thread.turns || []).length - visibleTurns.length);
+    for (let index = 0; index < visibleTurns.length; index += 1) {
+      const turn = visibleTurns[index];
+      const turnIdentity = turn.id || turn.startedAt || `turn-${firstVisibleIndex + index}`;
+      appendTurnHistory(turn, `${thread.id}:${turnIdentity}`, history);
+    }
+    elements.threadHistory.replaceChildren(history);
   }
-  elements.threadHistory.replaceChildren(history);
   renderHistoryNotice(thread, turnLimit);
   if (summary && previousActivityStatus !== summary.activityStatus) {
     renderProjectGroups();
@@ -2411,11 +3456,17 @@ async function refreshManagedRun(threadId = selectedThread?.id) {
 }
 
 async function startManagedTurn({ continueOnly = false } = {}) {
-  if (!selectedThread || isSendingMessage || managedRunIsActive()) return;
+  if (
+    !selectedThread
+    || isSendingMessage
+    || isUploadingAttachments
+    || managedRunIsActive()
+  ) return;
   const message = elements.composerInput.value.trim();
+  const attachments = selectedAttachments();
   if (continueOnly) {
-    if (!selectedThreadIsPaused() || message) return;
-  } else if (!message) {
+    if (!selectedThreadIsPaused() || message || attachments.length) return;
+  } else if (!message && !attachments.length) {
     return;
   }
   const threadId = selectedThread.id;
@@ -2432,7 +3483,10 @@ async function startManagedTurn({ continueOnly = false } = {}) {
           ...authorizationHeaders(),
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(continueOnly ? {} : { message }),
+        body: JSON.stringify(continueOnly ? {} : {
+          message,
+          attachmentIds: attachments.map((attachment) => attachment.id),
+        }),
       },
     );
     if (response.status === 401) {
@@ -2464,6 +3518,24 @@ async function startManagedTurn({ continueOnly = false } = {}) {
         || result.error === "desktop_dispatch_failed"
       ) {
         feedback = "Mac 没有确认发送，任务未启动";
+        return;
+      }
+      if (
+        result.error === "desktop_attachment_invalid"
+        || result.error === "desktop_attachment_paste_failed"
+        || result.error === "desktop_attachment_unconfirmed"
+        || result.error === "desktop_attachment_conflict"
+      ) {
+        feedback = result.error === "desktop_attachment_conflict"
+          ? "Mac 输入框里的附件状态与手机不一致，没有发送"
+          : "Mac 没有确认附件已加入，任务未启动";
+        return;
+      }
+      if (
+        result.error === "attachment_not_found"
+        || result.error === "invalid_attachments"
+      ) {
+        feedback = "附件已过期或不可用，请移除后重新选择";
         return;
       }
       if (result.error === "foreground_task_changed") {
@@ -2509,6 +3581,8 @@ async function startManagedTurn({ continueOnly = false } = {}) {
       elements.composerInput.value = "";
       resizeComposer();
       threadDrafts.delete(threadId);
+      threadAttachments.delete(threadId);
+      renderComposerAttachments();
     }
     threadHistoryCache.delete(threadId);
     if (result.mode === "desktop" && result.desktop) {
@@ -2603,6 +3677,7 @@ async function openThread(threadId, options = {}) {
   selectedThreadHasFinalAnswer = false;
   selectedThreadRuntimeStatus = String(summary.status?.type || summary.status || "");
   elements.composerInput.value = threadDrafts.get(threadId) || "";
+  renderComposerAttachments();
   resizeComposer();
   if (managedRun?.threadId !== threadId) {
     managedRun = undefined;
@@ -2620,10 +3695,15 @@ async function openThread(threadId, options = {}) {
   );
   const cached = cachedThreadDetail(summary, turnLimit);
   if (cached) {
-    renderThreadDetail(cached.thread, turnLimit, options);
+    renderThreadDetail(
+      cached.thread,
+      Math.min(turnLimit, Math.max(1, Number(cached.turnLimit) || turnLimit)),
+      options,
+    );
   } else {
     elements.threadMeta.textContent = "正在读取历史…";
     elements.threadHistory.replaceChildren();
+    renderedThreadId = "";
   }
   if (managedRun?.threadId !== threadId) {
     elements.managedLiveHistory.replaceChildren();
@@ -2635,7 +3715,17 @@ async function openThread(threadId, options = {}) {
   void refreshModelSettings(threadId);
   if (options.closeDrawer !== false) closeDrawer();
 
-  const cacheIsFresh = cached && Date.now() - cached.fetchedAt < THREAD_CACHE_TTL_MS;
+  const cacheMatchesRevision = Boolean(
+    cached
+    && String(cached.updatedAt || "") === String(summary.updatedAt || ""),
+  );
+  const cacheIsFresh = Boolean(
+    cached
+    && cached.complete !== false
+    && cached.turnLimit >= turnLimit
+    && cacheMatchesRevision
+    && Date.now() - cached.fetchedAt < THREAD_CACHE_TTL_MS,
+  );
   try {
     if (cacheIsFresh && !options.fresh) {
       if (options.refreshRun !== false) await refreshManagedRun(threadId);
@@ -2646,17 +3736,35 @@ async function openThread(threadId, options = {}) {
       revision: String(summary.updatedAt || ""),
     });
     if (options.fresh) query.set("fresh", "1");
-    const response = await fetch(
-      `/api/codex/threads/${encodeURIComponent(threadId)}?${query}`,
-      { headers: authorizationHeaders(), cache: "no-store" },
-    );
-    if (response.status === 401) {
-      handleUnauthorized();
-      return;
+    const cursor = cached?.complete !== false && cached?.thread?.historyCursor;
+    if (cursor?.turnId && cursor?.revision) {
+      query.set("tailTurnId", String(cursor.turnId));
+      query.set("tailRevision", String(cursor.revision));
     }
-    if (!response.ok) throw new Error("thread read failed");
-    const { thread } = await response.json();
-    rememberThreadDetail(summary, thread, turnLimit);
+    const fetchDetail = async () => {
+      const response = await fetch(
+        `/api/codex/threads/${encodeURIComponent(threadId)}?${query}`,
+        { headers: authorizationHeaders(), cache: "no-store" },
+      );
+      if (response.status === 401) {
+        handleUnauthorized();
+        return undefined;
+      }
+      if (!response.ok) throw new Error("thread read failed");
+      return (await response.json()).thread;
+    };
+    let incoming = await fetchDetail();
+    if (!incoming) return;
+    let merged = mergeIncrementalThreadDetail(cached, incoming);
+    if (!merged) {
+      query.delete("tailTurnId");
+      query.delete("tailRevision");
+      incoming = await fetchDetail();
+      if (!incoming) return;
+      merged = mergeIncrementalThreadDetail(undefined, incoming);
+    }
+    const { thread, complete } = merged;
+    rememberThreadDetail(summary, thread, turnLimit, complete);
     if (threadId !== selectedThread?.id) return;
     renderThreadDetail(thread, turnLimit, options);
     if (options.refreshRun !== false) await refreshManagedRun(threadId);
@@ -2698,38 +3806,62 @@ async function loadThreads() {
       showTokenDialog();
       return;
     }
-    const response = await fetch("/api/codex/threads?limit=50", {
-      headers: authorizationHeaders(),
-      cache: "no-store",
-    });
-    if (response.status === 401) {
-      handleUnauthorized();
+    let result;
+    for (let attempt = 0; attempt < 3 && !result; attempt += 1) {
+      try {
+        const response = await fetch("/api/codex/threads?limit=50", {
+          headers: authorizationHeaders(),
+          cache: "no-store",
+        });
+        if (response.status === 401) {
+          handleUnauthorized();
+          return;
+        }
+        if (!response.ok) throw new Error("thread list failed");
+        const candidate = await response.json();
+        if (!Array.isArray(candidate.projects) || !Array.isArray(candidate.threads)) {
+          throw new Error("invalid thread list");
+        }
+        result = candidate;
+      } catch {
+        if (attempt < 2) {
+          await new Promise((resolve) => window.setTimeout(resolve, 300 * (attempt + 1)));
+        }
+      }
+    }
+    if (!result) {
+      elements.projectsHint.textContent = "项目暂时不可用，正在自动重试…";
+      window.clearTimeout(threadCatalogRetryTimer);
+      threadCatalogRetryTimer = window.setTimeout(() => {
+        threadCatalogRetryTimer = undefined;
+        loadThreads();
+      }, 1_500);
       return;
     }
-    if (!response.ok) throw new Error("thread list failed");
-    const result = await response.json();
-    projects = result.projects || [];
-    threads = result.threads || [];
-    const projectCount = projects.length;
-    const recentCount = threads.filter(
-      (thread) => thread.collection !== "project",
-    ).length;
-    elements.projectsHint.textContent = threads.length
-      ? `${projectCount} 个项目 · ${recentCount} 个最近任务`
-      : "没有找到持久化任务";
+    window.clearTimeout(threadCatalogRetryTimer);
+    threadCatalogRetryTimer = undefined;
+    reconcileThreadCatalog(result);
     renderProjectGroups();
 
     const remembered = localStorage.getItem(SELECTED_THREAD_KEY);
     const initialId = (
+      threads.some((thread) => thread.id === notificationThreadId) && notificationThreadId
+    ) || (
       threads.some((thread) => thread.id === remembered) && remembered
     ) || uniqueCurrentThreadId() || threads[0]?.id;
     if (initialId) {
-      await openThread(initialId);
+      try {
+        await openThread(initialId);
+        if (notificationThreadId) {
+          notificationThreadId = "";
+          history.replaceState(null, "", window.location.pathname);
+        }
+      } catch {
+        // The catalog is already valid; conversation loading reports its own error.
+      }
     } else {
       openDrawer();
     }
-  } catch {
-    elements.projectsHint.textContent = "项目暂时不可用，请稍后重试";
   } finally {
     elements.refreshThreadsButton.disabled = false;
   }
@@ -2759,6 +3891,19 @@ async function refreshStatusOnce() {
     currentStopCandidates = Number(status.stopCandidates) || 0;
     desktopStatusKnown = true;
     desktopRequest = status.request || undefined;
+    const nextRequestFingerprint = desktopRequest?.fingerprint || "";
+    if (
+      desktopRequestNotificationsPrimed
+      && nextRequestFingerprint
+      && nextRequestFingerprint !== previousRequestFingerprint
+    ) {
+      showSystemNotification("Codex 需要你的确认", {
+        body: currentTaskTitle || "打开 Codex Pocket 查看请求",
+        threadId: uniqueCurrentThreadId(),
+        tag: `codex-request-${nextRequestFingerprint}`,
+      });
+    }
+    desktopRequestNotificationsPrimed = true;
     const foregroundThreadId = uniqueCurrentThreadId();
     if (
       currentStopCandidates === 1
@@ -2799,7 +3944,7 @@ async function refreshStatusOnce() {
         || previousStopCandidates !== currentStopCandidates
       )
     ) renderProjectGroups();
-    if (previousRequestFingerprint !== (desktopRequest?.fingerprint || "")) {
+    if (previousRequestFingerprint !== nextRequestFingerprint) {
       managedRenderSignature = "";
       renderManagedRun();
     }
@@ -2866,8 +4011,9 @@ async function refreshDesktopConversationIfRunning() {
 }
 
 async function interruptCurrentTask() {
-  if (!currentTaskTitle || selectedThread?.id !== uniqueCurrentThreadId()) return;
+  if (!selectedThread?.id || !selectedThread.title) return;
   const threadId = selectedThread.id;
+  const expectedTaskTitle = selectedThread.title;
   elements.confirmButton.disabled = true;
   elements.confirmButton.textContent = "正在核对…";
   try {
@@ -2879,12 +4025,14 @@ async function interruptCurrentTask() {
       },
       body: JSON.stringify({
         confirm: true,
-        expectedTaskTitle: currentTaskTitle,
+        threadId,
+        expectedTaskTitle,
       }),
     });
     const result = await response.json();
     if (response.ok && result.interrupted) {
       elements.stopDialog.close();
+      currentTaskTitle = expectedTaskTitle;
       currentStopCandidates = 0;
       desktopDispatchState = undefined;
       selectedThreadLastTurnStatus = "interrupting";
@@ -2908,8 +4056,23 @@ async function interruptCurrentTask() {
     }
     if (result.error === "foreground_task_changed") {
       elements.stopDialog.close();
-      elements.composerState.textContent = "Desktop 前台任务已切换，已拒绝停止";
+      elements.composerState.textContent = "任务切换后标识发生变化，已拒绝停止";
       await refreshStatus();
+      return;
+    }
+    if (result.error === "thread_navigation_failed") {
+      elements.stopDialog.close();
+      elements.composerState.textContent = "Mac 没有成功切换到该任务，未执行停止";
+      await refreshStatus();
+      return;
+    }
+    if (result.error === "active_stop_button_not_unique") {
+      elements.stopDialog.close();
+      elements.composerState.textContent = Number(result.stopCandidates) === 0
+        ? "任务可能刚刚结束，未找到停止按钮"
+        : "检测到多个停止按钮，为安全起见未执行";
+      await refreshStatus();
+      await openThread(threadId, { fresh: true, scroll: false });
       return;
     }
     throw new Error("interrupt refused");
@@ -2928,10 +4091,40 @@ elements.drawerScrim.addEventListener("click", closeDrawer);
 elements.newContentButton.addEventListener("click", () => scrollToLatest("smooth"));
 elements.refreshThreadsButton.addEventListener("click", loadThreads);
 elements.refreshUsageButton.addEventListener("click", () => refreshUsage(true));
+elements.notificationButton.addEventListener("click", toggleSystemNotifications);
+elements.notificationHelpClose.addEventListener("click", () => {
+  elements.notificationHelpDialog.close();
+});
+elements.localConnectionButton.addEventListener("click", openLocalConnectionDialog);
+elements.downloadLocalCaButton.addEventListener("click", downloadLocalCa);
+elements.localConnectionCancel.addEventListener("click", () => {
+  elements.localConnectionDialog.close();
+});
+elements.localConnectionSwitch.addEventListener("click", switchLocalConnection);
 elements.refreshConversationButton.addEventListener("click", refreshCurrentConversation);
 elements.modelSettingsButton.addEventListener("click", openModelSettingsDialog);
+elements.attachmentButton.addEventListener("click", () => {
+  if (!elements.attachmentButton.disabled) elements.attachmentInput.click();
+});
+elements.attachmentInput.addEventListener("change", () => {
+  uploadSelectedAttachments(elements.attachmentInput.files || []);
+});
 elements.newTaskCancel.addEventListener("click", () => {
   elements.newTaskDialog.close();
+});
+elements.newTaskAttachmentButton.addEventListener("click", () => {
+  if (!elements.newTaskAttachmentButton.disabled) {
+    elements.newTaskAttachmentInput.click();
+  }
+});
+elements.newTaskAttachmentInput.addEventListener("change", () => {
+  uploadNewTaskAttachments(elements.newTaskAttachmentInput.files || []);
+});
+elements.newTaskDialog.addEventListener("cancel", (event) => {
+  if (isCreatingTask || isUploadingNewTaskAttachments) event.preventDefault();
+});
+elements.newTaskDialog.addEventListener("close", () => {
+  if (!isCreatingTask && newTaskAttachments.length) discardNewTaskAttachments();
 });
 elements.newTaskForm.addEventListener("submit", (event) => {
   event.preventDefault();
@@ -2955,7 +4148,7 @@ elements.composerActionButton.addEventListener("click", () => {
       interruptManagedTurn();
       return;
     }
-    elements.confirmTaskTitle.textContent = currentTaskTitle;
+    elements.confirmTaskTitle.textContent = selectedThread?.title || "当前任务";
     elements.composerState.textContent = "请在弹窗中确认停止 Desktop 任务";
     elements.stopDialog.showModal();
     return;
@@ -3015,6 +4208,13 @@ elements.tokenForm.addEventListener("submit", (event) => {
   Promise.all([refreshStatus(), loadThreads()]);
 });
 
+renderNotificationState();
+registerNotificationWorker().catch(() => {
+  if (notificationsEnabled) {
+    elements.notificationButton.classList.add("blocked");
+    setNotificationButtonState("通知服务注册失败，请刷新后重试");
+  }
+});
 Promise.all([refreshStatus(), loadThreads()]);
 refreshTimer = window.setInterval(refreshStatus, 3000);
 managedPollTimer = window.setInterval(() => {
@@ -3025,9 +4225,12 @@ desktopHistoryPollTimer = window.setInterval(
   5_000,
 );
 drawerStatusPollTimer = window.setInterval(() => {
-  if (elements.projectDrawer.classList.contains("open")) {
+  if (elements.projectDrawer.classList.contains("open") || notificationsEnabled) {
     refreshDrawerThreadStates();
+  }
+  if (elements.projectDrawer.classList.contains("open")) {
     refreshUsage();
+    refreshSystemMetrics();
   }
 }, 10_000);
 elements.scrollRail.addEventListener("pointerdown", startScrollDrag);
@@ -3037,18 +4240,57 @@ elements.scrollRail.addEventListener("pointercancel", endScrollDrag);
 window.addEventListener("scroll", () => {
   scheduleScrollHandle();
   if (conversationNearBottom()) hideNewContentNotice();
+  else updateLatestButton();
 }, { passive: true });
-window.addEventListener("resize", scheduleScrollHandle);
+window.addEventListener("resize", () => {
+  scheduleScrollHandle();
+  updateLatestButton();
+});
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") refreshStatus();
+  if (document.visibilityState !== "visible") return;
+  refreshStatus();
+  if (selectedThread && !desktopHistoryRefreshInFlight) {
+    desktopHistoryRefreshInFlight = true;
+    openThread(selectedThread.id, {
+      fresh: true,
+      scroll: false,
+      refreshRun: false,
+      rerenderProjects: false,
+      closeDrawer: false,
+    }).finally(() => {
+      desktopHistoryRefreshInFlight = false;
+    });
+  }
+  if (elements.projectDrawer.classList.contains("open")) {
+    refreshDrawerThreadStates();
+  }
+});
+navigator.serviceWorker?.addEventListener("message", (event) => {
+  if (event.data?.type !== "open-thread" || typeof event.data.threadId !== "string") {
+    return;
+  }
+  const threadId = event.data.threadId;
+  if (threads.some((thread) => thread.id === threadId)) {
+    openThread(threadId, { fresh: true });
+  } else {
+    notificationThreadId = threadId;
+    loadThreads();
+  }
 });
 window.visualViewport?.addEventListener("resize", () => {
   resizeComposer();
   scheduleScrollHandle();
+  updateLatestButton();
 });
-document.addEventListener("toggle", scheduleScrollHandle, true);
+document.addEventListener("toggle", () => {
+  scheduleScrollHandle();
+  updateLatestButton();
+}, true);
 if (window.ResizeObserver) {
-  const layoutObserver = new ResizeObserver(scheduleScrollHandle);
+  const layoutObserver = new ResizeObserver(() => {
+    scheduleScrollHandle();
+    updateLatestButton();
+  });
   layoutObserver.observe(document.body);
   layoutObserver.observe(elements.composerShell);
 }

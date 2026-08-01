@@ -1,0 +1,37 @@
+name: 功能建议
+description: 提出增强方向、体验改进或安全改进建议
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你遇到的问题
+      description: 先说清楚当前哪里不够用
+      placeholder: 例如：新手第一次部署时，不容易判断覆盖是否成功
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你希望的改进
+      placeholder: 例如：增加一个可视化的部署自检页面
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: 预期收益
+      description: 说说它会帮助谁、解决什么成本
+  - type: dropdown
+    id: risk
+    attributes:
+      label: 是否涉及安全边界变化
+      options:
+        - 否，只是体验优化
+        - 可能涉及安全边界
+        - 不确定
+    validations:
+      required: true
+

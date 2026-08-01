@@ -11,6 +11,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import stat
 import subprocess
 import sys
@@ -40,18 +41,288 @@ from codex_app_server import (
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 4317
 MAX_BODY_BYTES = 32_768
+MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024
+MAX_ATTACHMENTS_PER_TURN = 4
+ATTACHMENT_TTL_SECONDS = 60 * 60
 MAX_DEVICES = 32
 PAIRING_TICKET_TTL_SECONDS = 300
 THREAD_DETAIL_CACHE_TTL_SECONDS = 60
 THREAD_DETAIL_CACHE_MAX_ENTRIES = 24
+LOCAL_HOTSPOT_STATE_DIR = (
+    Path.home() / "Library" / "Application Support" / "MobileCodexBridge"
+)
+LOCAL_HOTSPOT_CONFIG_PATH = LOCAL_HOTSPOT_STATE_DIR / "local-hotspot.json"
+LOCAL_HOTSPOT_CA_PATH = LOCAL_HOTSPOT_STATE_DIR / "local-hotspot-tls" / "local-ca.cer"
 
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def thread_history_cursor(detail: dict[str, Any]) -> dict[str, str]:
+    """Return a stable cursor for the last sanitized turn sent to the phone."""
+    turns = detail.get("turns")
+    if not isinstance(turns, list) or not turns:
+        return {"turnId": "", "revision": ""}
+    tail = turns[-1]
+    if not isinstance(tail, dict):
+        return {"turnId": "", "revision": ""}
+    turn_id = str(tail.get("id", ""))[:128]
+    if not turn_id:
+        return {"turnId": "", "revision": ""}
+    canonical = json.dumps(
+        tail,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "turnId": turn_id,
+        "revision": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def incremental_thread_detail(
+    detail: dict[str, Any],
+    base_turn_id: str,
+    base_revision: str,
+) -> dict[str, Any]:
+    """Return only the mutable tail when the client already has prior turns."""
+    result = dict(detail)
+    cursor = thread_history_cursor(detail)
+    result["historyCursor"] = cursor
+    turns = detail.get("turns")
+    if (
+        not base_turn_id
+        or not re.fullmatch(r"[0-9a-f]{64}", base_revision)
+        or not isinstance(turns, list)
+    ):
+        return result
+    base_index = next(
+        (
+            index
+            for index, turn in enumerate(turns)
+            if isinstance(turn, dict) and str(turn.get("id", "")) == base_turn_id
+        ),
+        None,
+    )
+    if base_index is None:
+        return result
+    base_cursor = thread_history_cursor({"turns": [turns[base_index]]})
+    base_unchanged = hmac.compare_digest(
+        base_cursor.get("revision", ""),
+        base_revision,
+    )
+    result["turns"] = (
+        turns[base_index + 1 :]
+        if base_unchanged
+        else turns[base_index:]
+    )
+    result["historyDelta"] = {
+        "baseTurnId": base_turn_id,
+        "mode": "append" if base_unchanged else "replace",
+    }
+    return result
+
+
 def same_text(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def read_mac_battery() -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/pmset", "-g", "batt"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"available": False}
+    if result.returncode != 0:
+        return {"available": False}
+    match = re.search(r"\b(\d{1,3})%;\s*([^;\n]+)", result.stdout)
+    if match is None:
+        return {"available": False}
+    percent = min(100, max(0, int(match.group(1))))
+    raw_state = match.group(2).strip().lower()
+    if "discharg" in raw_state:
+        state = "discharging"
+    elif "charg" in raw_state and "charged" not in raw_state:
+        state = "charging"
+    elif "charged" in raw_state or percent >= 100:
+        state = "full"
+    else:
+        state = "unknown"
+    power_match = re.search(r"drawing from '([^']+)'", result.stdout, re.IGNORECASE)
+    power_source = power_match.group(1).strip() if power_match else ""
+    return {
+        "available": True,
+        "percent": percent,
+        "state": state,
+        "powerSource": power_source[:40],
+    }
+
+
+def read_local_hotspot_status(
+    config_path: Optional[Path] = None,
+    ca_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    config_path = config_path or LOCAL_HOTSPOT_CONFIG_PATH
+    ca_path = ca_path or LOCAL_HOTSPOT_CA_PATH
+    unavailable = {"configured": False, "active": False}
+    try:
+        metadata = config_path.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            return unavailable
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return unavailable
+    if not isinstance(payload, dict) or payload.get("enabled") is not True:
+        return unavailable
+    listen_host = payload.get("listenHost")
+    expected_gateway = payload.get("expectedGateway")
+    expected_interface = payload.get("expectedInterface")
+    url = payload.get("url")
+    fingerprint = payload.get("caSha256")
+    port = payload.get("port")
+    if (
+        not isinstance(listen_host, str)
+        or not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", listen_host)
+        or not isinstance(expected_gateway, str)
+        or not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", expected_gateway)
+        or not isinstance(expected_interface, str)
+        or not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", expected_interface)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+        or url != f"https://{listen_host}:{port}/"
+        or not isinstance(fingerprint, str)
+        or not re.fullmatch(r"(?:[0-9A-F]{2}:){31}[0-9A-F]{2}", fingerprint)
+        or not ca_path.is_file()
+    ):
+        return unavailable
+    active = False
+    try:
+        result = subprocess.run(
+            ["/sbin/route", "-n", "get", "default"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        gateway_match = re.search(r"^\s*gateway:\s*(\S+)", result.stdout, re.MULTILINE)
+        interface_match = re.search(r"^\s*interface:\s*(\S+)", result.stdout, re.MULTILINE)
+        active = (
+            result.returncode == 0
+            and gateway_match is not None
+            and interface_match is not None
+            and gateway_match.group(1) == expected_gateway
+            and interface_match.group(1) == expected_interface
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        active = False
+    return {
+        "configured": True,
+        "active": active,
+        "url": url,
+        "listenHost": listen_host,
+        "caSha256": fingerprint,
+    }
+
+
+def thread_user_message_fingerprints(thread: dict[str, Any]) -> set[str]:
+    fingerprints: set[str] = set()
+    turns = thread.get("turns")
+    if not isinstance(turns, list):
+        return fingerprints
+    for turn in turns:
+        if not isinstance(turn, dict) or not isinstance(turn.get("items"), list):
+            continue
+        for item in turn["items"]:
+            if not isinstance(item, dict) or item.get("type") != "userMessage":
+                continue
+            content = item.get("content")
+            content_items = content if isinstance(content, list) else []
+            text = "\n".join(
+                part.get("text", "")
+                for part in content_items
+                if isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+            )
+            item_id = item.get("id")
+            identity = (
+                f"id:{item_id}"
+                if isinstance(item_id, str) and item_id
+                else f"text:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+            )
+            fingerprints.add(identity)
+    return fingerprints
+
+
+def desktop_message_landed(
+    app_server: CodexAppServerClient,
+    thread_id: str,
+    previous_fingerprints: set[str],
+    expected_message: str,
+    attempts: int = 15,
+) -> bool:
+    expected = expected_message.strip()
+    for attempt in range(attempts):
+        try:
+            result = app_server.read_thread(thread_id)
+            thread = result.get("thread")
+        except AppServerError:
+            thread = None
+        if isinstance(thread, dict):
+            turns = thread.get("turns")
+            if isinstance(turns, list):
+                for turn in turns:
+                    if not isinstance(turn, dict) or not isinstance(turn.get("items"), list):
+                        continue
+                    for item in turn["items"]:
+                        if not isinstance(item, dict) or item.get("type") != "userMessage":
+                            continue
+                        content = item.get("content")
+                        content_items = content if isinstance(content, list) else []
+                        text = "\n".join(
+                            part.get("text", "")
+                            for part in content_items
+                            if isinstance(part, dict)
+                            and part.get("type") == "text"
+                            and isinstance(part.get("text"), str)
+                        )
+                        item_id = item.get("id")
+                        identity = (
+                            f"id:{item_id}"
+                            if isinstance(item_id, str) and item_id
+                            else f"text:{hashlib.sha256(text.encode('utf-8')).hexdigest()}"
+                        )
+                        if identity not in previous_fingerprints and (
+                            not expected or expected in text
+                        ):
+                            return True
+        if attempt + 1 < attempts:
+            time.sleep(0.1)
+    return False
+
+
+def create_projectless_workspace(root: Path, title: str) -> Path:
+    """Create the dated standalone workspace shape used by Codex Desktop."""
+    dated_root = root / datetime.now().astimezone().date().isoformat()
+    dated_root.mkdir(parents=True, exist_ok=True)
+    words = re.findall(r"[a-z0-9]+", title.lower())
+    base = "-".join(words)[:48].strip("-") or "new-chat"
+    for index in range(1, 10_000):
+        name = base if index == 1 else f"{base}-{index}"
+        candidate = dated_root / name
+        try:
+            candidate.mkdir(mode=0o700)
+            return candidate
+        except FileExistsError:
+            continue
+    raise OSError("unable to allocate a standalone Codex workspace")
 
 
 def safe_model_catalog(result: dict[str, Any]) -> list[dict[str, Any]]:
@@ -329,6 +600,189 @@ class DeviceRegistry:
             return True
 
 
+class AttachmentStore:
+    def __init__(
+        self,
+        root: Path,
+        ttl_seconds: int = ATTACHMENT_TTL_SECONDS,
+    ) -> None:
+        self.root = root
+        self.ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def validate_filename(filename: str) -> str:
+        name = filename.strip()
+        if (
+            not name
+            or name in {".", ".."}
+            or len(name) > 180
+            or len(name.encode("utf-8")) > 240
+            or "/" in name
+            or "\\" in name
+            or any(ord(character) < 32 or ord(character) == 127 for character in name)
+        ):
+            raise ValueError("invalid_attachment_name")
+        return name
+
+    def _ensure_root(self) -> None:
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self.root, 0o700)
+
+    def _remove_unlocked(self, attachment_id: str) -> None:
+        directory = self.root / attachment_id
+        try:
+            directory.relative_to(self.root)
+        except ValueError:
+            return
+        if directory.is_dir() and not directory.is_symlink():
+            shutil.rmtree(directory)
+
+    def _load_unlocked(self, attachment_id: str) -> dict[str, Any]:
+        if (
+            not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", attachment_id)
+            or not self.root.exists()
+        ):
+            raise KeyError(attachment_id)
+        metadata_path = self.root / attachment_id / "metadata.json"
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise KeyError(attachment_id) from error
+        if not isinstance(metadata, dict) or metadata.get("id") != attachment_id:
+            raise KeyError(attachment_id)
+        return metadata
+
+    def purge_expired(self) -> None:
+        with self._lock:
+            if not self.root.exists():
+                return
+            now = time.time()
+            for directory in self.root.iterdir():
+                if not directory.is_dir() or directory.is_symlink():
+                    continue
+                try:
+                    metadata = self._load_unlocked(directory.name)
+                    expired = float(metadata.get("expiresAt", 0)) <= now
+                except (KeyError, TypeError, ValueError):
+                    expired = True
+                if expired:
+                    self._remove_unlocked(directory.name)
+
+    def create(
+        self,
+        device_id: str,
+        filename: str,
+        content_type: str,
+        source: Any,
+        length: int,
+    ) -> dict[str, Any]:
+        name = self.validate_filename(filename)
+        if length <= 0 or length > MAX_ATTACHMENT_BYTES:
+            raise ValueError("invalid_attachment_size")
+        media_type = content_type.strip()[:120] or "application/octet-stream"
+        if any(ord(character) < 32 for character in media_type):
+            raise ValueError("invalid_attachment_type")
+        with self._lock:
+            self.purge_expired()
+            self._ensure_root()
+            attachment_id = secrets.token_urlsafe(18)
+            directory = self.root / attachment_id
+            directory.mkdir(mode=0o700)
+            os.chmod(directory, 0o700)
+            file_path = directory / name
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(file_path, flags, 0o600)
+            written = 0
+            try:
+                with os.fdopen(descriptor, "wb") as output:
+                    remaining = length
+                    while remaining:
+                        chunk = source.read(min(64 * 1024, remaining))
+                        if not chunk:
+                            raise ValueError("incomplete_attachment")
+                        output.write(chunk)
+                        written += len(chunk)
+                        remaining -= len(chunk)
+                    output.flush()
+                    os.fsync(output.fileno())
+                now = time.time()
+                metadata = {
+                    "id": attachment_id,
+                    "deviceId": device_id,
+                    "name": name,
+                    "size": written,
+                    "contentType": media_type,
+                    "createdAt": now,
+                    "expiresAt": now + self.ttl_seconds,
+                }
+                metadata_path = directory / "metadata.json"
+                metadata_path.write_text(
+                    json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
+                    encoding="utf-8",
+                )
+                os.chmod(metadata_path, 0o600)
+                return self.public_metadata(metadata)
+            except Exception:
+                self._remove_unlocked(attachment_id)
+                raise
+
+    @staticmethod
+    def public_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: metadata[key]
+            for key in ("id", "name", "size", "contentType", "expiresAt")
+        }
+
+    def resolve(self, attachment_ids: list[str], device_id: str) -> list[dict[str, Any]]:
+        if (
+            len(attachment_ids) > MAX_ATTACHMENTS_PER_TURN
+            or len(set(attachment_ids)) != len(attachment_ids)
+        ):
+            raise ValueError("invalid_attachments")
+        with self._lock:
+            self.purge_expired()
+            resolved = []
+            root = self.root.resolve()
+            for attachment_id in attachment_ids:
+                try:
+                    metadata = self._load_unlocked(attachment_id)
+                except KeyError as error:
+                    raise ValueError("attachment_not_found") from error
+                if metadata.get("deviceId") != device_id:
+                    raise PermissionError("attachment_not_owned")
+                try:
+                    name = self.validate_filename(str(metadata.get("name", "")))
+                    path = (self.root / attachment_id / name).resolve(strict=True)
+                    path.relative_to(root)
+                    file_stat = path.lstat()
+                except (OSError, ValueError) as error:
+                    raise ValueError("attachment_not_found") from error
+                if (
+                    not stat.S_ISREG(file_stat.st_mode)
+                    or path.is_symlink()
+                    or file_stat.st_size != metadata.get("size")
+                    or file_stat.st_size > MAX_ATTACHMENT_BYTES
+                ):
+                    raise ValueError("attachment_not_found")
+                resolved.append({**self.public_metadata(metadata), "path": str(path)})
+            return resolved
+
+    def delete(self, attachment_id: str, device_id: str) -> bool:
+        with self._lock:
+            self.purge_expired()
+            try:
+                metadata = self._load_unlocked(attachment_id)
+            except KeyError:
+                return False
+            if metadata.get("deviceId") != device_id:
+                raise PermissionError("attachment_not_owned")
+            self._remove_unlocked(attachment_id)
+            return True
+
+
 class PairingTicketStore:
     def __init__(self, ttl_seconds: int = PAIRING_TICKET_TTL_SECONDS) -> None:
         self.ttl_seconds = ttl_seconds
@@ -502,6 +956,62 @@ class DesktopController:
                 detail = result.stderr.strip() or "Accessibility interrupt failed"
                 raise RuntimeError(detail)
 
+    def interrupt_thread(self, thread_id: str, expected_task_title: str) -> None:
+        """Navigate Desktop to a thread, verify its identity, then press Stop."""
+        thread_url = f"codex://threads/{urllib.parse.quote(thread_id, safe='')}"
+        with self._interrupt_lock:
+            navigation = subprocess.run(
+                ["/usr/bin/open", "-b", "com.openai.codex", thread_url],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if navigation.returncode != 0:
+                detail = navigation.stderr.strip() or "Unable to open Codex task"
+                raise ThreadNavigationError(detail)
+
+            navigation_deadline = time.monotonic() + 8
+            actual_task_title = ""
+            while time.monotonic() < navigation_deadline:
+                try:
+                    actual_task_title = self.current_task_title()
+                except (RuntimeError, TaskIdentityError):
+                    actual_task_title = ""
+                if same_text(actual_task_title, expected_task_title):
+                    break
+                time.sleep(0.2)
+            else:
+                raise ThreadNavigationError(
+                    "Codex Desktop did not navigate to the requested task"
+                )
+
+            stop_deadline = time.monotonic() + 4
+            count = 0
+            while time.monotonic() < stop_deadline:
+                first_title = self.current_task_title()
+                if not same_text(first_title, expected_task_title):
+                    raise TaskChangedError(first_title)
+                count = self.stop_candidate_count()
+                second_title = self.current_task_title()
+                if not same_text(second_title, expected_task_title):
+                    raise TaskChangedError(second_title)
+                if count == 1:
+                    break
+                if count > 1:
+                    raise StopCandidateError(count)
+                time.sleep(0.2)
+            if count != 1:
+                raise StopCandidateError(count)
+
+            result = self._run(
+                "--stop",
+                f"--expected-task-title={expected_task_title}",
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or "Accessibility interrupt failed"
+                raise RuntimeError(detail)
+
     def send_to_desktop(
         self,
         thread_id: str,
@@ -509,6 +1019,7 @@ class DesktopController:
         message: str,
         *,
         continue_only: bool = False,
+        attachment_paths: Optional[list[str]] = None,
     ) -> dict[str, Any]:
         payload = json.dumps(
             {
@@ -516,14 +1027,23 @@ class DesktopController:
                 "expectedTaskTitle": expected_task_title,
                 "message": message,
                 "continueOnly": continue_only,
+                "attachmentPaths": attachment_paths or [],
             },
             ensure_ascii=False,
             separators=(",", ":"),
         )
         with self._interrupt_lock:
             result = self._run("--desktop-send", input_text=payload)
+            if result.returncode in {28, 43} and attachment_paths:
+                # Attaching a preview briefly replaces the Electron composer
+                # text area. Some image previews also become observable only
+                # after Electron finishes its asynchronous layout pass. A
+                # bounded retry reuses the attachment after the UI settles.
+                time.sleep(3.0)
+                result = self._run("--desktop-send", input_text=payload)
         if result.returncode != 0:
             reasons = {
+                2: "desktop_accessibility_unavailable",
                 26: "task_identity_mismatch",
                 27: "desktop_turn_active",
                 28: "desktop_composer_unavailable",
@@ -539,6 +1059,10 @@ class DesktopController:
                 38: "desktop_keyboard_input_unconfirmed",
                 39: "desktop_mouse_fallback_refused",
                 40: "desktop_mouse_click_failed",
+                41: "desktop_attachment_invalid",
+                42: "desktop_attachment_paste_failed",
+                43: "desktop_attachment_unconfirmed",
+                44: "desktop_attachment_conflict",
             }
             raise DesktopDispatchError(
                 reasons.get(result.returncode, "desktop_dispatch_failed"),
@@ -640,6 +1164,10 @@ class TaskChangedError(RuntimeError):
         super().__init__("foreground task changed")
 
 
+class ThreadNavigationError(RuntimeError):
+    pass
+
+
 class BridgeServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -653,6 +1181,8 @@ class BridgeServer(ThreadingHTTPServer):
         pairing_tickets: Optional[PairingTicketStore] = None,
         app_server: Optional[CodexAppServerClient] = None,
         codex_state_path: Optional[Path] = None,
+        attachment_store: Optional[AttachmentStore] = None,
+        projectless_root: Optional[Path] = None,
     ) -> None:
         self.token = token
         self.controller = controller
@@ -660,15 +1190,53 @@ class BridgeServer(ThreadingHTTPServer):
         self.device_registry = device_registry or DeviceRegistry()
         self.pairing_tickets = pairing_tickets or PairingTicketStore()
         self.app_server = app_server
+        self.attachment_store = attachment_store or AttachmentStore(
+            Path.home()
+            / "Library"
+            / "Application Support"
+            / "MobileCodexBridge"
+            / "uploads"
+        )
         self.codex_state_path = (
             codex_state_path
             or Path.home() / ".codex" / ".codex-global-state.json"
         )
+        self.projectless_root = (
+            projectless_root
+            or Path.home() / "Documents" / "Codex"
+        )
+        self._project_index_lock = threading.RLock()
+        self._project_index = load_codex_project_index(self.codex_state_path)
+        self._project_index_shrink_seen_at: Optional[float] = None
         self._thread_detail_cache: OrderedDict[
             tuple[str, str, int], tuple[float, dict[str, Any]]
         ] = OrderedDict()
         self._thread_detail_cache_lock = threading.RLock()
         super().__init__(address, BridgeHandler)
+
+    def project_index(self) -> dict[str, Any]:
+        """Keep a last-known complete sidebar while Desktop rewrites its state."""
+        candidate = load_codex_project_index(self.codex_state_path)
+        with self._project_index_lock:
+            cached_projects = self._project_index.get("projects", {})
+            candidate_projects = candidate.get("projects", {})
+            cached_count = len(cached_projects) if isinstance(cached_projects, dict) else 0
+            candidate_count = (
+                len(candidate_projects) if isinstance(candidate_projects, dict) else 0
+            )
+            if candidate_count >= cached_count:
+                self._project_index = candidate
+                self._project_index_shrink_seen_at = None
+            else:
+                now = time.monotonic()
+                if self._project_index_shrink_seen_at is None:
+                    self._project_index_shrink_seen_at = now
+                elif now - self._project_index_shrink_seen_at >= 30:
+                    # A stable shrink most likely represents an intentional
+                    # project removal rather than a transient Desktop rewrite.
+                    self._project_index = candidate
+                    self._project_index_shrink_seen_at = None
+            return self._project_index
 
     def cached_thread_detail(
         self,
@@ -737,6 +1305,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         status: HTTPStatus,
         body: bytes,
         content_type: str,
+        extra_headers: Optional[dict[str, str]] = None,
     ) -> None:
         accepts_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
         compressible = (
@@ -758,12 +1327,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
+        if self.close_connection:
+            self.send_header("Connection", "close")
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "img-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+            "img-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'none'",
         )
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -833,6 +1406,44 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return None
         return payload
 
+    def _resolve_attachments(
+        self,
+        payload: dict[str, Any],
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        attachment_ids = payload.get("attachmentIds", [])
+        if (
+            not isinstance(attachment_ids, list)
+            or len(attachment_ids) > MAX_ATTACHMENTS_PER_TURN
+            or any(
+                not isinstance(attachment_id, str)
+                or not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", attachment_id)
+                for attachment_id in attachment_ids
+            )
+        ):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_attachments"})
+            return False, []
+        if not attachment_ids:
+            return True, []
+        device = self._device_identity()
+        if device is None:
+            self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "device_required"})
+            return False, []
+        try:
+            attachments = self.server.attachment_store.resolve(
+                attachment_ids,
+                device["id"],
+            )
+        except PermissionError:
+            self._send_json(HTTPStatus.FORBIDDEN, {"error": "attachment_not_owned"})
+            return False, []
+        except ValueError as error:
+            self._send_json(
+                HTTPStatus.BAD_REQUEST,
+                {"error": str(error) or "invalid_attachments"},
+            )
+            return False, []
+        return True, attachments
+
     def do_GET(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
         if path == "/":
@@ -843,6 +1454,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if path == "/app.js":
             self._serve_asset("app.js", "text/javascript; charset=utf-8")
+            return
+        if path == "/sw.js":
+            self._serve_asset("sw.js", "text/javascript; charset=utf-8")
+            return
+        if path == "/manifest.webmanifest":
+            self._serve_asset(
+                "manifest.webmanifest",
+                "application/manifest+json; charset=utf-8",
+            )
             return
         if path == "/health":
             self._send_json(HTTPStatus.OK, {"ok": True, "service": "mac-codex-bridge"})
@@ -861,6 +1481,37 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
             self._send_json(HTTPStatus.OK, {"ok": True, "device": device})
+            return
+        if path == "/api/system/metrics":
+            if not self._require_control_auth():
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {
+                    "ok": True,
+                    "battery": read_mac_battery(),
+                    "localHotspot": read_local_hotspot_status(),
+                },
+            )
+            return
+        if path == "/api/local-hotspot/ca":
+            if not self._require_control_auth():
+                return
+            status = read_local_hotspot_status()
+            if not status.get("configured"):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "hotspot_not_configured"})
+                return
+            try:
+                body = LOCAL_HOTSPOT_CA_PATH.read_bytes()
+            except OSError:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "hotspot_ca_unavailable"})
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                body,
+                "application/x-x509-ca-cert",
+                {"Content-Disposition": 'attachment; filename="codex-pocket-local-ca.cer"'},
+            )
             return
         if path == "/api/codex/models":
             if not self._require_control_auth():
@@ -935,7 +1586,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     {"ok": False, "error": "codex_app_server_failed"},
                 )
                 return
-            project_index = load_codex_project_index(self.server.codex_state_path)
+            project_index = self.server.project_index()
             self._send_json(
                 HTTPStatus.OK,
                 {
@@ -995,6 +1646,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             revision = str(query.get("revision", [""])[0])[:128]
             force_fresh = query.get("fresh", ["0"])[0] == "1"
+            tail_turn_id = str(query.get("tailTurnId", [""])[0])[:128]
+            tail_revision = str(query.get("tailRevision", [""])[0])[:64].lower()
             detail = None if force_fresh else self.server.cached_thread_detail(
                 thread_id,
                 revision,
@@ -1014,7 +1667,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     return
                 detail = summarize_thread_detail(
                     thread,
-                    load_codex_project_index(self.server.codex_state_path),
+                    self.server.project_index(),
                     max_turns=turn_limit,
                 )
                 self.server.cache_thread_detail(
@@ -1023,11 +1676,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     turn_limit,
                     detail,
                 )
+            response_detail = incremental_thread_detail(
+                detail,
+                tail_turn_id,
+                tail_revision,
+            )
             self._send_json(
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "thread": detail,
+                    "thread": response_detail,
                 },
             )
             return
@@ -1062,11 +1720,78 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
 
     def do_POST(self) -> None:
+        if urllib.parse.urlsplit(self.path).path == "/api/attachments":
+            device = self._device_identity()
+            if device is None:
+                self.close_connection = True
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "device_required"})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                self.close_connection = True
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_content_length"},
+                )
+                return
+            if length <= 0:
+                self.close_connection = True
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "empty_attachment"})
+                return
+            if length > MAX_ATTACHMENT_BYTES:
+                self.close_connection = True
+                self._send_json(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    {"error": "attachment_too_large"},
+                )
+                return
+            encoded_name = self.headers.get("X-Codex-Filename", "")
+            try:
+                filename = urllib.parse.unquote(encoded_name, errors="strict")
+                metadata = self.server.attachment_store.create(
+                    device["id"],
+                    filename,
+                    self.headers.get("Content-Type", "application/octet-stream"),
+                    self.rfile,
+                    length,
+                )
+            except (UnicodeError, ValueError) as error:
+                self.close_connection = True
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": str(error) or "invalid_attachment"},
+                )
+                return
+            except OSError:
+                self._send_json(
+                    HTTPStatus.SERVICE_UNAVAILABLE,
+                    {"error": "attachment_storage_failed"},
+                )
+                return
+            self._send_json(
+                HTTPStatus.CREATED,
+                {"ok": True, "attachment": metadata},
+            )
+            return
         if self.path == "/api/devices/pairing-ticket":
             if not self._require_master_auth():
                 return
             payload = self._read_json()
             if payload is None:
+                return
+            ticket = self.server.pairing_tickets.create()
+            self._send_json(
+                HTTPStatus.CREATED,
+                {
+                    "ok": True,
+                    "pairingTicket": ticket,
+                    "expiresIn": self.server.pairing_tickets.ttl_seconds,
+                },
+            )
+            return
+        if self.path == "/api/devices/handoff-ticket":
+            if not self._require_control_auth():
                 return
             ticket = self.server.pairing_tickets.create()
             self._send_json(
@@ -1123,6 +1848,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             payload = self._read_json()
             if payload is None:
                 return
+            attachments_ok, attachments = self._resolve_attachments(payload)
+            if not attachments_ok:
+                return
             message = payload.get("message")
             project_id = payload.get("projectId")
             model = payload.get("model")
@@ -1130,8 +1858,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             service_tier = payload.get("serviceTier")
             if (
                 not isinstance(message, str)
-                or not message.strip()
                 or len(message.strip()) > 20_000
+                or (not message.strip() and not attachments)
             ):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_message"})
                 return
@@ -1167,7 +1895,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            project_index = load_codex_project_index(self.server.codex_state_path)
+            project_index = self.server.project_index()
             projects = project_index.get("projects")
             project = projects.get(project_id) if isinstance(projects, dict) else None
             if project_id is not None and not isinstance(project, dict):
@@ -1177,27 +1905,28 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if project_id is not None and not isinstance(cwd, str):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "project_path_missing"})
                 return
-            try:
-                desktop_status = self.server.controller.status()
-            except (RuntimeError, TaskIdentityError):
-                self._send_json(
-                    HTTPStatus.BAD_GATEWAY,
-                    {"ok": False, "error": "desktop_state_unavailable"},
-                )
-                return
-            if desktop_status.get("stopCandidates") != 0:
-                self._send_json(
-                    HTTPStatus.CONFLICT,
-                    {"ok": False, "error": "desktop_turn_active"},
-                )
-                return
-
             normalized_lines = [
                 re.sub(r"\s+", " ", line).strip()
                 for line in message.strip().splitlines()
                 if line.strip()
             ]
-            title = (normalized_lines[0] if normalized_lines else "新任务")[:80]
+            title = (
+                normalized_lines[0]
+                if normalized_lines
+                else f"分析 {attachments[0]['name']}"
+            )[:80]
+            if project_id is None:
+                try:
+                    cwd = str(create_projectless_workspace(
+                        self.server.projectless_root,
+                        title,
+                    ))
+                except OSError:
+                    self._send_json(
+                        HTTPStatus.BAD_GATEWAY,
+                        {"ok": False, "error": "projectless_directory_failed"},
+                    )
+                    return
             try:
                 created = self.server.app_server.create_thread(
                     title=title,
@@ -1250,40 +1979,66 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
+            previous_user_messages = thread_user_message_fingerprints(thread)
             try:
                 desktop = self.server.controller.send_to_desktop(
                     thread_id,
                     title,
                     message.strip(),
+                    attachment_paths=[
+                        attachment["path"] for attachment in attachments
+                    ],
                 )
             except DesktopDispatchError as error:
-                print(
-                    f"New Desktop task dispatch failed: reason={error.reason}; "
-                    f"detail={error.detail}",
-                    file=sys.stderr,
-                    flush=True,
-                )
-                status = (
-                    HTTPStatus.CONFLICT
-                    if error.reason in {
-                        "desktop_turn_active",
-                        "desktop_draft_present",
-                        "foreground_task_changed",
-                        "task_identity_mismatch",
+                recovered = (
+                    error.reason in {
+                        "desktop_send_unconfirmed",
+                        "desktop_mouse_fallback_refused",
                     }
-                    else HTTPStatus.BAD_GATEWAY
+                    and desktop_message_landed(
+                        self.server.app_server,
+                        thread_id,
+                        previous_user_messages,
+                        message,
+                    )
                 )
-                self._send_json(
-                    status,
-                    {
-                        "ok": False,
-                        "error": error.reason,
-                        "threadCreated": True,
-                        "threadId": thread_id,
-                    },
-                )
-                return
-            refreshed_index = load_codex_project_index(self.server.codex_state_path)
+                if recovered:
+                    desktop = {
+                        "ok": True,
+                        "mode": "message",
+                        "taskTitle": title,
+                        "confirmedBy": "threadHistory",
+                    }
+                else:
+                    print(
+                        f"New Desktop task dispatch failed: reason={error.reason}; "
+                        f"detail={error.detail}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    status = (
+                        HTTPStatus.CONFLICT
+                        if error.reason in {
+                            "desktop_turn_active",
+                            "desktop_draft_present",
+                            "foreground_task_changed",
+                            "task_identity_mismatch",
+                        }
+                        else HTTPStatus.BAD_GATEWAY
+                    )
+                    refreshed_index = self.server.project_index()
+                    self._send_json(
+                        status,
+                        {
+                            "ok": False,
+                            "error": error.reason,
+                            "threadCreated": True,
+                            "threadId": thread_id,
+                            "thread": summarize_thread(thread, refreshed_index),
+                        },
+                    )
+                    return
+            refreshed_index = self.server.project_index()
             summary = summarize_thread(thread, refreshed_index)
             self._send_json(
                 HTTPStatus.ACCEPTED,
@@ -1387,8 +2142,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if len(parts) == 2 and parts[1] in {"turn", "continue"}:
                 is_continue = parts[1] == "continue"
                 message = payload.get("message")
+                attachments_ok, attachments = self._resolve_attachments(payload)
+                if not attachments_ok:
+                    return
+                if is_continue and attachments:
+                    self._send_json(
+                        HTTPStatus.BAD_REQUEST,
+                        {"error": "invalid_attachments"},
+                    )
+                    return
                 if not is_continue:
-                    if not isinstance(message, str) or not message.strip():
+                    if not isinstance(message, str) or (
+                        not message.strip() and not attachments
+                    ):
                         self._send_json(
                             HTTPStatus.BAD_REQUEST,
                             {"error": "message_required"},
@@ -1424,38 +2190,63 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             {"ok": False, "error": "thread_not_interrupted"},
                         )
                         return
+                previous_user_messages = thread_user_message_fingerprints(thread)
                 try:
                     desktop = self.server.controller.send_to_desktop(
                         thread_id,
                         summary["title"],
                         "" if is_continue else message.strip(),
                         continue_only=is_continue,
+                        attachment_paths=[
+                            attachment["path"] for attachment in attachments
+                        ],
                     )
                 except DesktopDispatchError as error:
-                    print(
-                        f"Desktop dispatch failed: reason={error.reason}; "
-                        f"detail={error.detail}",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    status = (
-                        HTTPStatus.CONFLICT
-                        if error.reason in {
-                            "desktop_turn_active",
-                            "desktop_draft_present",
-                            "foreground_task_changed",
-                            "task_identity_mismatch",
+                    recovered = (
+                        not is_continue
+                        and error.reason in {
+                            "desktop_send_unconfirmed",
+                            "desktop_mouse_fallback_refused",
                         }
-                        else HTTPStatus.BAD_GATEWAY
+                        and desktop_message_landed(
+                            self.server.app_server,
+                            thread_id,
+                            previous_user_messages,
+                            message,
+                        )
                     )
-                    self._send_json(
-                        status,
-                        {
-                            "ok": False,
-                            "error": error.reason,
-                        },
-                    )
-                    return
+                    if recovered:
+                        desktop = {
+                            "ok": True,
+                            "mode": "message",
+                            "taskTitle": summary["title"],
+                            "confirmedBy": "threadHistory",
+                        }
+                    else:
+                        print(
+                            f"Desktop dispatch failed: reason={error.reason}; "
+                            f"detail={error.detail}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        status = (
+                            HTTPStatus.CONFLICT
+                            if error.reason in {
+                                "desktop_turn_active",
+                                "desktop_draft_present",
+                                "foreground_task_changed",
+                                "task_identity_mismatch",
+                            }
+                            else HTTPStatus.BAD_GATEWAY
+                        )
+                        self._send_json(
+                            status,
+                            {
+                                "ok": False,
+                                "error": error.reason,
+                            },
+                        )
+                        return
                 self.server.invalidate_thread_detail(thread_id)
                 self._send_json(
                     HTTPStatus.ACCEPTED,
@@ -1583,8 +2374,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(expected_task_title, str) or not expected_task_title.strip():
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "task_identity_required"})
             return
+        thread_id = payload.get("threadId")
+        if (
+            not isinstance(thread_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{5,255}", thread_id)
+        ):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "thread_identity_required"})
+            return
         try:
-            self.server.controller.interrupt(expected_task_title.strip())
+            self.server.controller.interrupt_thread(
+                thread_id,
+                expected_task_title.strip(),
+            )
+        except ThreadNavigationError:
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {"ok": False, "error": "thread_navigation_failed"},
+            )
+            return
         except TaskChangedError:
             self._send_json(
                 HTTPStatus.CONFLICT,
@@ -1617,6 +2424,38 @@ class BridgeHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         path = urllib.parse.urlsplit(self.path).path
+        attachment_prefix = "/api/attachments/"
+        if path.startswith(attachment_prefix):
+            device = self._device_identity()
+            if device is None:
+                self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "device_required"})
+                return
+            attachment_id = urllib.parse.unquote(path[len(attachment_prefix) :])
+            if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", attachment_id):
+                self._send_json(
+                    HTTPStatus.BAD_REQUEST,
+                    {"error": "invalid_attachment_id"},
+                )
+                return
+            try:
+                removed = self.server.attachment_store.delete(
+                    attachment_id,
+                    device["id"],
+                )
+            except PermissionError:
+                self._send_json(
+                    HTTPStatus.FORBIDDEN,
+                    {"error": "attachment_not_owned"},
+                )
+                return
+            if not removed:
+                self._send_json(
+                    HTTPStatus.NOT_FOUND,
+                    {"error": "attachment_not_found"},
+                )
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, "deleted": attachment_id})
+            return
         prefix = "/api/devices/"
         if not path.startswith(prefix) or path == "/api/devices/self":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})

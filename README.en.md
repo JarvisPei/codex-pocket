@@ -12,12 +12,17 @@ Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own ta
 - Create a task inside a Project or Recents and hand its first instruction to Desktop.
 - Read recent messages, final answers, and position-preserving `Working` / `Worked` activity summaries.
 - Send follow-up instructions to existing Desktop tasks.
-- Distinguish running, paused, and completed tasks and safely stop the active Desktop turn.
+- Attach files or images from mobile, up to four files and 20 MB per file.
+- Distinguish running, paused, and completed tasks and safely stop any running Desktop turn after an ID-based task switch.
 - Change the task model, reasoning effort, and Fast service tier.
 - Display remaining usage.
 - Handle one-shot command/file approvals and structured user questions.
 - Pair with a five-minute single-use QR ticket and revoke individual devices.
 - Refresh long conversations incrementally with a new-content indicator and draggable scrollbar.
+- Optionally show Android system notifications when a task completes, pauses, or needs confirmation; tapping returns to that task.
+- Optionally use hotspot-local HTTPS to bypass distant DERP relays when the phone also provides the Mac's hotspot.
+
+System notifications are off by default and must be enabled from the mobile drawer. They contain only the task title and state, never response text. This implementation requires the Codex Pocket page to remain open or in the browser background; fully terminating the browser stops polling, and no notification content is sent to a third-party push service.
 
 ## Architecture
 
@@ -76,6 +81,18 @@ tailscale serve status
 
 Open the HTTPS URL assigned by Tailscale.
 
+## Local phone-hotspot access (optional)
+
+When the Android control phone also provides the Mac's hotspot, carrier NAT can force Tailscale through a distant DERP relay. While both devices are in that topology, run on the Mac:
+
+```sh
+zsh scripts/install-local-hotspot-proxy.sh [port]
+```
+
+The installer records the current Mac hotspot address, phone gateway, and Wi-Fi interface. It creates a separate TLS reverse proxy that activates only when all three match. The main Bridge remains on `127.0.0.1:4317`, and the local CA has critical name constraints limited to the configured hotspot IP and `codex-pocket.local`.
+
+After installation, open the drawer through the existing Tailscale URL and tap `⌁`. Download and install the CA in Android's certificate settings, return to the page, then choose **Switch to local**. A five-minute, single-use handoff ticket enrolls a separate credential for the local HTTPS origin. The local listener pauses when the configured hotspot is no longer active.
+
 ## Pair a phone
 
 Generate a five-minute, single-use QR code on the Mac:
@@ -98,11 +115,13 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 ## Security boundary
 
 - Loopback binding only.
+- The optional hotspot listener is a separate TLS process restricted to one configured IP, gateway, interface, and Host allowlist; it only proxies to loopback.
 - No CORS, general shell, arbitrary JSON-RPC, or raw app-server proxy.
 - Each phone receives a separate random credential; the Mac stores only its SHA-256 digest.
 - The Keychain master credential never leaves the Mac.
 - Desktop send verifies the exact thread id, task title, empty composer, and unique Send control.
-- Stop requires explicit confirmation and a unique semantic Stop control.
+- Attachments are isolated per paired device, stored in a mode-`0700` upload directory, expire after one hour, and are rejected by the Helper if their path leaves that directory.
+- Stop requires explicit confirmation, an ID-based Desktop task switch, an exact title check, and a unique semantic Stop control.
 - Logs contain metadata only, not Authorization values or full prompt bodies.
 - Markdown is rendered without `innerHTML`; external links are restricted.
 
@@ -116,7 +135,6 @@ python3 -m unittest tests.test_mac_bridge
 
 ## Current limitations
 
-- Mobile attachments are not available yet.
 - The helper depends on Codex Desktop's current Accessibility structure and may need updates after major Desktop UI changes.
 - This is a private single-user, single-Mac deployment, not a multi-user SaaS service.
 

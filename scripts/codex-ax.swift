@@ -46,6 +46,7 @@ struct DesktopSendPayload: Decodable {
     let expectedTaskTitle: String
     let message: String
     let continueOnly: Bool
+    let attachmentPaths: [String]?
 }
 
 struct DesktopRequestResponsePayload: Decodable {
@@ -131,6 +132,19 @@ guard let app = NSWorkspace.shared.runningApplications.first(where: {
 }
 
 let root = AXUIElementCreateApplication(app.processIdentifier)
+// Electron exposes its Chromium web-content accessibility tree lazily. Codex
+// Desktop can therefore appear as only an opaque AXScrollArea until an
+// assistive client explicitly enables manual accessibility. Keep the strict
+// semantic checks below, but make the web roles available before scanning.
+let manualAccessibilityResult = AXUIElementSetAttributeValue(
+    root,
+    "AXManualAccessibility" as CFString,
+    kCFBooleanTrue
+)
+if manualAccessibilityResult == .success {
+    // The renderer publishes the tree asynchronously after the first toggle.
+    Thread.sleep(forTimeInterval: 0.15)
+}
 let stopTerms = [
     "stop", "cancel", "interrupt", "abort",
     "停止", "中止", "取消", "打断",
@@ -152,9 +166,15 @@ func sizeAttribute(_ element: AXUIElement, _ name: CFString) -> CGSize? {
     return size
 }
 
+func activeWindows() -> [AXUIElement] {
+    if let focused = attribute(root, kAXFocusedWindowAttribute as CFString) {
+        return [focused as! AXUIElement]
+    }
+    return attribute(root, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+}
+
 func scanBottomOfWindows(performStop: Bool, checkStop: Bool) {
-    let windows =
-        attribute(root, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+    let windows = activeWindows()
     var hitElements = Set<CFHashCode>()
     var stopCandidates: [AXUIElement] = []
 
@@ -285,8 +305,7 @@ func inspectWindowHeaders() {
 }
 
 func currentTaskTitles() -> [String] {
-    let windows =
-        attribute(root, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+    let windows = activeWindows()
     var hitElements = Set<CFHashCode>()
     var titles: [String] = []
 
@@ -327,6 +346,60 @@ func currentTaskTitles() -> [String] {
         }
     }
     return titles
+}
+
+func visibleSidebarTaskButtons(titled expectedTitle: String) -> [AXUIElement] {
+    var visitedElements = Set<CFHashCode>()
+    var matches: [AXUIElement] = []
+
+    for window in activeWindows() {
+        guard
+            let windowPosition = pointAttribute(window, kAXPositionAttribute as CFString),
+            let windowSize = sizeAttribute(window, kAXSizeAttribute as CFString)
+        else { continue }
+        let sidebarRight = windowPosition.x + min(390, windowSize.width * 0.32)
+        let windowBottom = windowPosition.y + windowSize.height
+
+        func scan(_ element: AXUIElement, depth: Int) {
+            guard depth <= 32 else { return }
+            let hash = CFHash(element)
+            guard visitedElements.insert(hash).inserted else { return }
+
+            let role = stringAttribute(element, kAXRoleAttribute as CFString) ?? ""
+            let title = stringAttribute(element, kAXTitleAttribute as CFString)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if role == kAXButtonRole as String,
+               title == expectedTitle,
+               actions(element).contains(kAXPressAction as String),
+               (attribute(element, kAXEnabledAttribute as CFString) as? Bool) != false,
+               let position = pointAttribute(element, kAXPositionAttribute as CFString),
+               let size = sizeAttribute(element, kAXSizeAttribute as CFString),
+               size.width > 0,
+               size.height > 0,
+               position.x >= windowPosition.x,
+               position.x < sidebarRight,
+               position.y >= windowPosition.y + 45,
+               position.y < windowBottom
+            {
+                matches.append(element)
+            }
+
+            for child in children(element) {
+                scan(child, depth: depth + 1)
+            }
+        }
+
+        scan(window, depth: 0)
+    }
+    return matches
+}
+
+func navigateToVisibleSidebarTask(titled expectedTitle: String) -> Bool {
+    let candidates = visibleSidebarTaskButtons(titled: expectedTitle)
+    guard candidates.count == 1 else { return false }
+    let candidate = candidates[0]
+    _ = AXUIElementPerformAction(candidate, "AXScrollToVisible" as CFString)
+    return AXUIElementPerformAction(candidate, kAXPressAction as CFString) == .success
 }
 
 func exactSemanticMatch(_ element: AXUIElement, terms: Set<String>) -> Bool {
@@ -420,6 +493,40 @@ func postKey(_ keyCode: CGKeyCode, flags: CGEventFlags = []) -> Bool {
     return true
 }
 
+func executeAppleScript(_ source: String, failureLabel: String) -> Bool {
+    guard let script = NSAppleScript(source: source) else { return false }
+    var error: NSDictionary?
+    _ = script.executeAndReturnError(&error)
+    if let error {
+        fputs("\(failureLabel): \(error)\n", stderr)
+        return false
+    }
+    return true
+}
+
+func appleScriptString(_ value: String) -> String {
+    "\"" + value
+        .replacingOccurrences(of: "\\", with: "\\\\")
+        .replacingOccurrences(of: "\"", with: "\\\"") + "\""
+}
+
+func prepareSystemImageClipboard(_ url: URL) -> Bool {
+    executeAppleScript(
+        "set imageFile to POSIX file \(appleScriptString(url.path))\n"
+            + "set the clipboard to (read imageFile as JPEG picture)",
+        failureLabel: "System image clipboard failed"
+    )
+}
+
+func performSystemEventsPaste() -> Bool {
+    executeAppleScript(
+        "tell application \"ChatGPT\" to activate\n"
+            + "delay 0.2\n"
+            + "tell application \"System Events\" to keystroke \"v\" using {command down}",
+        failureLabel: "System Events paste failed"
+    )
+}
+
 func postUnicodeText(_ text: String) -> Bool {
     var start = text.startIndex
     while start < text.endIndex {
@@ -461,37 +568,286 @@ func postUnicodeText(_ text: String) -> Bool {
     return true
 }
 
-func clickElementCenter(_ element: AXUIElement) -> Bool {
+func validatedAttachmentURLs(_ paths: [String]) -> [URL]? {
+    guard paths.count <= 4, Set(paths).count == paths.count else { return nil }
+    let rootURL = FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent("Library", isDirectory: true)
+        .appendingPathComponent("Application Support", isDirectory: true)
+        .appendingPathComponent("MobileCodexBridge", isDirectory: true)
+        .appendingPathComponent("uploads", isDirectory: true)
+        .resolvingSymlinksInPath()
+        .standardizedFileURL
+    let rootPrefix = rootURL.path.hasSuffix("/") ? rootURL.path : rootURL.path + "/"
+    var urls: [URL] = []
+    for path in paths {
+        let url = URL(fileURLWithPath: path)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL
+        guard url.path.hasPrefix(rootPrefix) else { return nil }
+        guard
+            let values = try? url.resourceValues(
+                forKeys: [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+            ),
+            values.isRegularFile == true,
+            values.isSymbolicLink != true,
+            let size = values.fileSize,
+            size > 0,
+            size <= 20 * 1024 * 1024
+        else { return nil }
+        urls.append(url)
+    }
+    return urls
+}
+
+func clonedPasteboardItems(_ items: [NSPasteboardItem]?) -> [NSPasteboardItem] {
+    (items ?? []).map { source in
+        let clone = NSPasteboardItem()
+        for type in source.types {
+            if let data = source.data(forType: type) {
+                clone.setData(data, forType: type)
+            }
+        }
+        return clone
+    }
+}
+
+struct ComposerAttachmentEvidence {
+    var names = Set<String>()
+    var removalControls = 0
+    var previewImages = 0
+    var upperComposerButtons = 0
+
+    var estimatedCount: Int {
+        max(max(removalControls, previewImages), upperComposerButtons)
+    }
+}
+
+func composerAttachmentEvidence(_ expectedNames: Set<String>) -> ComposerAttachmentEvidence {
+    guard !expectedNames.isEmpty,
+          let windowValue = attribute(root, kAXFocusedWindowAttribute as CFString)
+    else { return ComposerAttachmentEvidence() }
+    let window = windowValue as! AXUIElement
     guard
-        let position = pointAttribute(element, kAXPositionAttribute as CFString),
-        let size = sizeAttribute(element, kAXSizeAttribute as CFString),
-        size.width >= 20,
-        size.width <= 120,
-        size.height >= 20,
-        size.height <= 120
-    else { return false }
-    let center = CGPoint(
-        x: position.x + size.width / 2,
-        y: position.y + size.height / 2
+        let windowPosition = pointAttribute(window, kAXPositionAttribute as CFString),
+        let windowSize = sizeAttribute(window, kAXSizeAttribute as CFString)
+    else { return ComposerAttachmentEvidence() }
+    let candidates = composerCandidates()
+    guard candidates.textAreas.count == 1,
+          let textAreaPosition = pointAttribute(
+            candidates.textAreas[0],
+            kAXPositionAttribute as CFString
+          ),
+          let textAreaSize = sizeAttribute(
+            candidates.textAreas[0],
+            kAXSizeAttribute as CFString
+          )
+    else { return ComposerAttachmentEvidence() }
+    let startX = max(windowPosition.x, textAreaPosition.x)
+    let endX = min(
+        windowPosition.x + windowSize.width,
+        min(textAreaPosition.x + textAreaSize.width, startX + 700)
     )
+    let startY = max(
+        windowPosition.y + max(0, windowSize.height - 650),
+        textAreaPosition.y - 320
+    )
+    let endY = min(
+        windowPosition.y + windowSize.height,
+        textAreaPosition.y + textAreaSize.height
+    )
+    var evidence = ComposerAttachmentEvidence()
+    var hitElements = Set<CFHashCode>()
+    var y = startY
+    while y <= endY {
+        var x = startX
+        while x <= endX {
+            var hit: AXUIElement?
+            if AXUIElementCopyElementAtPosition(
+                root,
+                Float(x),
+                Float(y),
+                &hit
+            ) == .success, let hit {
+                let hash = CFHash(hit)
+                guard hitElements.insert(hash).inserted else {
+                    x += 12
+                    continue
+                }
+                let role = stringAttribute(hit, kAXRoleAttribute as CFString) ?? ""
+                let position = pointAttribute(hit, kAXPositionAttribute as CFString)
+                let size = sizeAttribute(hit, kAXSizeAttribute as CFString)
+                let fields = normalizedFields(hit)
+                for field in fields {
+                    let value = field.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if expectedNames.contains(value) {
+                        evidence.names.insert(value)
+                    }
+                }
+                if role == kAXButtonRole as String,
+                   actions(hit).contains(kAXPressAction as String) {
+                    let label = elementSemanticLabel(hit).lowercased()
+                    let removalTerms = [
+                        "remove attachment", "remove file", "remove image",
+                        "delete attachment", "delete file", "delete image",
+                        "remove", "delete", "close", "移除", "删除",
+                    ]
+                    if removalTerms.contains(where: { label == $0 || label.contains($0) }) {
+                        evidence.removalControls += 1
+                    } else if label.isEmpty,
+                              let position, let size,
+                              position.y + size.height / 2 < textAreaPosition.y,
+                              size.width <= 80, size.height <= 80 {
+                        // Electron does not currently label the image thumbnail's
+                        // small remove button. Only an unlabelled control can be
+                        // used as fallback evidence: labelled history activity
+                        // buttons such as "Ran commands" can sit immediately above
+                        // the composer in long tasks and are not attachments.
+                        evidence.upperComposerButtons += 1
+                    }
+                }
+                if role == kAXImageRole as String,
+                   let size,
+                   size.width >= 40, size.width <= 320,
+                   size.height >= 40, size.height <= 320 {
+                    evidence.previewImages += 1
+                }
+            }
+            x += 12
+        }
+        y += 12
+    }
+    return evidence
+}
+
+func attachmentEvidenceMatches(
+    _ evidence: ComposerAttachmentEvidence,
+    expectedNames: Set<String>
+) -> Bool {
+    evidence.names == expectedNames || evidence.estimatedCount == expectedNames.count
+}
+
+func visibleComposerAttachmentNames(_ expectedNames: Set<String>) -> Set<String> {
+    composerAttachmentEvidence(expectedNames).names
+}
+
+func pasteAttachments(_ urls: [URL], into textArea: AXUIElement) -> Bool {
+    guard !urls.isEmpty else { return true }
+    let expectedNames = Set(urls.map(\.lastPathComponent))
+    let initialTextAreaPosition = pointAttribute(
+        textArea,
+        kAXPositionAttribute as CFString
+    )
+    let initialTextAreaSize = sizeAttribute(
+        textArea,
+        kAXSizeAttribute as CFString
+    )
+    let existingEvidence = composerAttachmentEvidence(expectedNames)
+    if attachmentEvidenceMatches(existingEvidence, expectedNames: expectedNames) {
+        return true
+    }
+    if !existingEvidence.names.isEmpty || existingEvidence.estimatedCount > 0 {
+        return false
+    }
+
+    let pasteboard = NSPasteboard.general
+    let backup = clonedPasteboardItems(pasteboard.pasteboardItems)
+    pasteboard.clearContents()
+    if urls.count == 1, NSImage(contentsOf: urls[0]) != nil {
+        guard prepareSystemImageClipboard(urls[0]) else { return false }
+    } else {
+        guard pasteboard.writeObjects(urls.map { $0 as NSURL }) else { return false }
+    }
+    let injectedChangeCount = pasteboard.changeCount
+    defer {
+        if pasteboard.changeCount == injectedChangeCount {
+            pasteboard.clearContents()
+            if !backup.isEmpty {
+                _ = pasteboard.writeObjects(backup)
+            }
+        }
+    }
+
+    _ = AXUIElementPerformAction(textArea, kAXPressAction as CFString)
+    guard performSystemEventsPaste() else { return false }
+    var missingTextAreaSamples = 0
+    var lastEvidence = ComposerAttachmentEvidence()
+    for _ in 0..<80 {
+        Thread.sleep(forTimeInterval: 0.1)
+        lastEvidence = composerAttachmentEvidence(expectedNames)
+        if attachmentEvidenceMatches(lastEvidence, expectedNames: expectedNames) {
+            return true
+        }
+        // Recent Codex Desktop builds render image thumbnails as unlabelled
+        // Electron nodes, so neither a filename nor an AXImage is exposed.
+        // A single inserted preview still moves or resizes the otherwise-empty
+        // composer text area. Treat that deterministic layout change as
+        // attachment confirmation; multi-file sends still require count/name
+        // evidence so that a partial paste cannot be accepted.
+        if urls.count == 1 {
+            let latest = composerCandidates()
+            if latest.textAreas.isEmpty {
+                missingTextAreaSamples += 1
+                // In current Electron builds an accepted image paste replaces
+                // the composer text area before the thumbnail becomes visible
+                // to Accessibility. The original text area was present and
+                // focused immediately before Cmd-V, so a sustained replacement
+                // is a stronger signal than an unlabelled thumbnail hit.
+                if missingTextAreaSamples >= 3 {
+                    return true
+                }
+                continue
+            }
+            missingTextAreaSamples = 0
+            if latest.textAreas.count == 1,
+               let latestPosition = pointAttribute(
+                   latest.textAreas[0],
+                   kAXPositionAttribute as CFString
+               ),
+               let latestSize = sizeAttribute(
+                   latest.textAreas[0],
+                   kAXSizeAttribute as CFString
+               ),
+               let initialTextAreaPosition,
+               let initialTextAreaSize,
+               (
+                   abs(latestPosition.y - initialTextAreaPosition.y) >= 8
+                   || abs(latestSize.height - initialTextAreaSize.height) >= 8
+               )
+            {
+                return true
+            }
+        }
+    }
+    fputs(
+        "Attachment evidence unavailable: names=\(lastEvidence.names.count), "
+            + "removal=\(lastEvidence.removalControls), "
+            + "images=\(lastEvidence.previewImages), "
+            + "upperControls=\(lastEvidence.upperComposerButtons), "
+            + "missingTextAreaSamples=\(missingTextAreaSamples).\n",
+        stderr
+    )
+    return false
+}
+
+func clickPoint(_ point: CGPoint) -> Bool {
     let originalLocation = CGEvent(source: nil)?.location
     guard
         let move = CGEvent(
             mouseEventSource: nil,
             mouseType: .mouseMoved,
-            mouseCursorPosition: center,
+            mouseCursorPosition: point,
             mouseButton: .left
         ),
         let down = CGEvent(
             mouseEventSource: nil,
             mouseType: .leftMouseDown,
-            mouseCursorPosition: center,
+            mouseCursorPosition: point,
             mouseButton: .left
         ),
         let up = CGEvent(
             mouseEventSource: nil,
             mouseType: .leftMouseUp,
-            mouseCursorPosition: center,
+            mouseCursorPosition: point,
             mouseButton: .left
         )
     else { return false }
@@ -512,6 +868,34 @@ func clickElementCenter(_ element: AXUIElement) -> Bool {
         restore.post(tap: .cghidEventTap)
     }
     return true
+}
+
+func clickElementCenter(_ element: AXUIElement) -> Bool {
+    guard
+        let position = pointAttribute(element, kAXPositionAttribute as CFString),
+        let size = sizeAttribute(element, kAXSizeAttribute as CFString),
+        size.width >= 20,
+        size.width <= 120,
+        size.height >= 20,
+        size.height <= 120
+    else { return false }
+    return clickPoint(CGPoint(
+        x: position.x + size.width / 2,
+        y: position.y + size.height / 2
+    ))
+}
+
+func clickComposerTextArea(_ textArea: AXUIElement) -> Bool {
+    guard
+        let position = pointAttribute(textArea, kAXPositionAttribute as CFString),
+        let size = sizeAttribute(textArea, kAXSizeAttribute as CFString),
+        size.width >= 100,
+        size.height >= 40
+    else { return false }
+    return clickPoint(CGPoint(
+        x: position.x + size.width / 2,
+        y: position.y + size.height / 2
+    ))
 }
 
 func focusedWindowElements(maxDepth: Int = 36) -> [AXUIElement] {
@@ -880,14 +1264,21 @@ func performDesktopSend() {
     let expectedTitle = payload.expectedTaskTitle
         .trimmingCharacters(in: .whitespacesAndNewlines)
     let message = payload.message.trimmingCharacters(in: .whitespacesAndNewlines)
+    let attachmentPaths = payload.attachmentPaths ?? []
     guard !expectedTitle.isEmpty, expectedTitle.count <= 1_000 else {
         failDesktopSend("Invalid expected task title.", code: 22)
     }
     guard message.count <= 20_000 else {
         failDesktopSend("Desktop message is too long.", code: 23)
     }
-    guard payload.continueOnly ? message.isEmpty : !message.isEmpty else {
+    guard payload.continueOnly
+        ? (message.isEmpty && attachmentPaths.isEmpty)
+        : (!message.isEmpty || !attachmentPaths.isEmpty)
+    else {
         failDesktopSend("Desktop message mode does not match its input.", code: 24)
+    }
+    guard let attachmentURLs = validatedAttachmentURLs(attachmentPaths) else {
+        failDesktopSend("Desktop attachment path is outside the Bridge upload store.", code: 41)
     }
     guard let url = URL(string: "codex://threads/\(payload.threadId)"),
           NSWorkspace.shared.open(url)
@@ -905,8 +1296,21 @@ func performDesktopSend() {
             break
         }
     }
+    if !titleMatched, navigateToVisibleSidebarTask(titled: expectedTitle) {
+        for _ in 0..<50 {
+            Thread.sleep(forTimeInterval: 0.1)
+            let titles = currentTaskTitles()
+            if titles.count == 1, titles[0] == expectedTitle {
+                titleMatched = true
+                break
+            }
+        }
+    }
     guard titleMatched else {
-        failDesktopSend("Codex task identity did not match after navigation.", code: 26)
+        failDesktopSend(
+            "Codex task identity did not match after deep-link and unique visible sidebar navigation.",
+            code: 26
+        )
     }
 
     var candidates = composerCandidates()
@@ -916,7 +1320,7 @@ func performDesktopSend() {
     guard candidates.textAreas.count == 1 else {
         failDesktopSend("Expected one Codex composer text area.", code: 28)
     }
-    let textArea = candidates.textAreas[0]
+    var textArea = candidates.textAreas[0]
     let existingText = composerText(textArea)
     let reuseMatchingDraft = !payload.continueOnly && existingText == message
     guard existingText.isEmpty || reuseMatchingDraft else {
@@ -932,6 +1336,40 @@ func performDesktopSend() {
         )
         guard focusResult == .success else {
             failDesktopSend("Unable to focus the Codex composer.", code: 35)
+        }
+        Thread.sleep(forTimeInterval: 0.1)
+        let existingAttachmentNames = visibleComposerAttachmentNames(
+            Set(attachmentURLs.map(\.lastPathComponent))
+        )
+        if !existingAttachmentNames.isEmpty,
+           existingAttachmentNames.count != attachmentURLs.count
+        {
+            failDesktopSend("The Codex composer contains only part of the requested attachments.", code: 44)
+        }
+        guard pasteAttachments(attachmentURLs, into: textArea) else {
+            failDesktopSend("Codex did not confirm the requested attachments.", code: 43)
+        }
+        var replacementTextArea: AXUIElement?
+        for _ in 0..<150 {
+            candidates = composerCandidates()
+            if candidates.textAreas.count == 1 {
+                replacementTextArea = candidates.textAreas[0]
+                break
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        guard let replacementTextArea else {
+            failDesktopSend("Expected one Codex composer text area after attaching files.", code: 28)
+        }
+        textArea = replacementTextArea
+        _ = AXUIElementPerformAction(textArea, kAXPressAction as CFString)
+        let refocusResult = AXUIElementSetAttributeValue(
+            textArea,
+            kAXFocusedAttribute as CFString,
+            kCFBooleanTrue
+        )
+        guard refocusResult == .success else {
+            failDesktopSend("Unable to refocus the Codex composer after attaching files.", code: 35)
         }
         Thread.sleep(forTimeInterval: 0.1)
         if reuseMatchingDraft {
@@ -953,19 +1391,81 @@ func performDesktopSend() {
                 failDesktopSend("Matching Codex draft did not clear.", code: 36)
             }
         }
-        guard postUnicodeText(message) else {
-            failDesktopSend("Unable to type into the Codex composer.", code: 37)
-        }
-        var inputConfirmed = false
-        for _ in 0..<30 {
-            Thread.sleep(forTimeInterval: 0.05)
-            if composerText(textArea) == message {
-                inputConfirmed = true
-                break
+        if !message.isEmpty {
+            var inputConfirmed = false
+
+            func refreshComposerTextArea() -> AXUIElement? {
+                let latest = composerCandidates()
+                return latest.textAreas.count == 1 ? latest.textAreas[0] : nil
             }
-        }
-        guard inputConfirmed else {
-            failDesktopSend("Codex did not acknowledge keyboard input.", code: 38)
+
+            // Setting AXValue on Electron's rich composer after an attachment
+            // can update a stale editor node while React replaces it. The text
+            // becomes visible, but reading the old AX node still returns empty;
+            // the keyboard fallback would then append a duplicate copy. Use
+            // focused keyboard input for attachment turns, and reacquire the
+            // current text area while confirming either input path.
+            if attachmentURLs.isEmpty {
+                let setResult = AXUIElementSetAttributeValue(
+                    textArea,
+                    kAXValueAttribute as CFString,
+                    message as CFString
+                )
+                if setResult == .success {
+                    for _ in 0..<12 {
+                        Thread.sleep(forTimeInterval: 0.05)
+                        if let latestTextArea = refreshComposerTextArea() {
+                            textArea = latestTextArea
+                        }
+                        if composerText(textArea) == message {
+                            inputConfirmed = true
+                            break
+                        }
+                    }
+                }
+            }
+
+            if !inputConfirmed {
+                if let latestTextArea = refreshComposerTextArea() {
+                    textArea = latestTextArea
+                }
+                let textBeforeKeyboardInput = composerText(textArea)
+                if textBeforeKeyboardInput == message {
+                    inputConfirmed = true
+                } else if !textBeforeKeyboardInput.isEmpty {
+                    failDesktopSend(
+                        "Codex composer contains unexpected text after direct input.",
+                        code: 38
+                    )
+                }
+            }
+            if !inputConfirmed {
+                guard clickComposerTextArea(textArea) else {
+                    failDesktopSend("Unable to click the Codex composer text area.", code: 35)
+                }
+                _ = AXUIElementSetAttributeValue(
+                    textArea,
+                    kAXFocusedAttribute as CFString,
+                    kCFBooleanTrue
+                )
+                Thread.sleep(forTimeInterval: 0.1)
+                guard postUnicodeText(message) else {
+                    failDesktopSend("Unable to type into the Codex composer.", code: 37)
+                }
+                for _ in 0..<30 {
+                    Thread.sleep(forTimeInterval: 0.05)
+                    if let latestTextArea = refreshComposerTextArea() {
+                        textArea = latestTextArea
+                    }
+                    if composerText(textArea) == message {
+                        inputConfirmed = true
+                        break
+                    }
+                }
+            }
+            guard inputConfirmed else {
+                failDesktopSend("Codex did not acknowledge keyboard input.", code: 38)
+            }
         }
     }
 
@@ -981,27 +1481,71 @@ func performDesktopSend() {
     guard let sendButton else {
         failDesktopSend("Expected one semantic Send button.", code: 31)
     }
-    let titlesBeforePress = currentTaskTitles()
-    guard titlesBeforePress.count == 1, titlesBeforePress[0] == expectedTitle else {
+    var titleMatchedBeforePress = false
+    for _ in 0..<20 {
+        let titlesBeforePress = currentTaskTitles()
+        if titlesBeforePress.count == 1, titlesBeforePress[0] == expectedTitle {
+            titleMatchedBeforePress = true
+            break
+        }
+        // Attaching a preview can briefly rebuild the header subtree along
+        // with the composer. Preserve the identity guard, but require a
+        // persistent mismatch instead of rejecting a single transient sample.
+        Thread.sleep(forTimeInterval: 0.1)
+    }
+    guard titleMatchedBeforePress else {
         failDesktopSend("Codex task identity changed before sending.", code: 32)
     }
-    let pressResult = AXUIElementPerformAction(sendButton, kAXPressAction as CFString)
-    guard pressResult == .success else {
-        failDesktopSend(
-            "Unable to press the semantic Send button: AX error \(pressResult.rawValue).",
-            code: 33
-        )
+    if !clickElementCenter(sendButton) {
+        let pressResult = AXUIElementPerformAction(sendButton, kAXPressAction as CFString)
+        guard pressResult == .success else {
+            failDesktopSend(
+                "Unable to activate the semantic Send button: AX error \(pressResult.rawValue).",
+                code: 33
+            )
+        }
     }
 
     func waitForSubmissionAcknowledgement(attempts: Int) -> (Bool, Int) {
+        let expectedAttachmentNames = Set(attachmentURLs.map(\.lastPathComponent))
         for _ in 0..<attempts {
             Thread.sleep(forTimeInterval: 0.1)
+            let latestTitles = currentTaskTitles()
+            if latestTitles.count != 1 || latestTitles[0] != expectedTitle {
+                // The Electron header can disappear for a few frames while an
+                // attachment submission reflows the task. Keep sampling; the
+                // later fallback still requires an exact title match before it
+                // can click anything again.
+                continue
+            }
             let latest = composerCandidates()
             let latestStopCount = latest.stopButtons.count
             if latestStopCount == 1 {
                 return (true, latestStopCount)
             }
             if latest.textAreas.count == 1,
+               composerIsEmpty(latest.textAreas[0]),
+               latest.sendButtons.count == 1,
+               (attribute(
+                   latest.sendButtons[0],
+                   kAXEnabledAttribute as CFString
+               ) as? Bool) == false
+            {
+                // A very short turn can finish before the Stop button is ever
+                // sampled. Once the composer is empty and Send is disabled,
+                // neither text nor an attachment draft remains. This is also
+                // more reliable than scanning the freshly inserted user image,
+                // which can briefly sit inside the composer's search region.
+                return (true, latestStopCount)
+            }
+            if !expectedAttachmentNames.isEmpty {
+                let evidence = composerAttachmentEvidence(expectedAttachmentNames)
+                if evidence.names.isEmpty && evidence.estimatedCount == 0 {
+                    return (true, latestStopCount)
+                }
+            }
+            if expectedAttachmentNames.isEmpty,
+               latest.textAreas.count == 1,
                composerIsEmpty(latest.textAreas[0])
             {
                 return (true, latestStopCount)
@@ -1011,12 +1555,27 @@ func performDesktopSend() {
     }
 
     var (accepted, stopCount) = waitForSubmissionAcknowledgement(attempts: 10)
+    if !accepted, !attachmentURLs.isEmpty {
+        // Image submission can finish before a Stop sample while the composer
+        // and newly inserted user message are still animating. Give the
+        // attachment-specific cleared-composer signal time to stabilize before
+        // considering a second Send click.
+        (accepted, stopCount) = waitForSubmissionAcknowledgement(attempts: 40)
+    }
     if !accepted {
         let titlesBeforeClick = currentTaskTitles()
         candidates = composerCandidates()
         let draftStillMatches = payload.continueOnly || (
             candidates.textAreas.count == 1 &&
-            composerText(candidates.textAreas[0]) == message
+            composerText(candidates.textAreas[0]) == message &&
+            (
+                attachmentURLs.isEmpty || attachmentEvidenceMatches(
+                    composerAttachmentEvidence(
+                        Set(attachmentURLs.map(\.lastPathComponent))
+                    ),
+                    expectedNames: Set(attachmentURLs.map(\.lastPathComponent))
+                )
+            )
         )
         guard
             titlesBeforeClick.count == 1,

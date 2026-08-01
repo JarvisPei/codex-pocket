@@ -1,0 +1,73 @@
+name: 部署求助
+description: 部署卡住、环境识别失败、手机访问异常时使用
+title: "[Deploy] "
+labels:
+  - deployment
+body:
+  - type: markdown
+    attributes:
+      value: |
+        这个模板适合“我按文档做了，但某一步过不去”的情况。
+        为了保护你的环境，请只贴脱敏后的输出。
+  - type: textarea
+    id: goal
+    attributes:
+      label: 你现在想完成什么
+      placeholder: 例如：让手机通过 Tailscale 打开私有 HTTPS 页面并登录
+    validations:
+      required: true
+  - type: dropdown
+    id: step
+    attributes:
+      label: 卡住的步骤
+      options:
+        - 下载上游源码
+        - 应用覆盖文件
+        - npm install
+        - 启动本地服务
+        - 首次注册
+        - Tailscale 远程访问
+        - 首次设备审批
+        - 手机浏览器正常但封装 App 异常
+        - 其他
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: 环境信息
+      placeholder: |
+        Windows 版本：
+        Python 版本：
+        Node 版本：
+        nginx 版本：
+        是否安装 Tailscale：
+    validations:
+      required: true
+  - type: textarea
+    id: checks
+    attributes:
+      label: 你已经做过的检查
+      description: 推荐附上 `scripts/check-mobile-codex-runtime.ps1` 的脱敏结果
+      placeholder: |
+        - `check-mobile-codex-runtime.ps1` 输出：
+        - `http://127.0.0.1:3001` 是否可打开：
+        - 桌面工具状态：
+    validations:
+      required: true
+  - type: textarea
+    id: error
+    attributes:
+      label: 错误信息
+      render: shell
+      placeholder: 粘贴脱敏后的报错文本
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已经阅读过 `README.md` 和 `docs/DEPLOYMENT.zh-CN.md`
+          required: true
+        - label: 我已经确认内容里没有 secret、私有域名或本机敏感路径
+          required: true
+

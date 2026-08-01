@@ -46,8 +46,11 @@ the helper source changes, macOS may require removing the old Accessibility
 entry and adding the rebuilt app again because its local code signature changed.
 
 The server refuses non-loopback binds. Put Tailscale Serve or another reviewed
-private reverse proxy in front of `127.0.0.1:4317`; do not bind it directly to a
-LAN or public interface.
+private reverse proxy in front of `127.0.0.1:4317`; do not bind the Bridge
+itself directly to a LAN or public interface. The optional
+`local_hotspot_proxy.py` is a separate TLS-only reverse proxy. It activates only
+when its configured private listen address, default gateway, and interface all
+match, validates the HTTP Host, and can only forward to loopback.
 
 The process that starts the bridge needs macOS Accessibility permission because
 the bridge invokes `scripts/codex-ax.swift`.
@@ -71,7 +74,9 @@ authenticated mobile API exposes only:
 - `POST /api/codex/threads` to create a persisted Desktop task in a selected
   Project or in Recents, then submit its first instruction through Desktop.
 - `POST /api/codex/threads/<id>/turn` to navigate Desktop to the exact thread,
-  verify its title, and submit one text-only message through the Desktop composer.
+  verify its title, and submit one message with up to four device-owned attachments.
+- `POST /api/attachments` and `DELETE /api/attachments/<id>` for bounded,
+  per-device temporary uploads. Files are limited to 20 MB and expire after one hour.
 - `POST /api/codex/threads/<id>/continue` to press Desktop Continue only when the
   latest persisted turn is still `interrupted`.
 - Legacy managed-run read/interrupt/request routes remain temporarily available
@@ -106,6 +111,24 @@ action becomes a Continue triangle and presses Desktop's semantic Continue/Send
 control without adding a user message. Typed text still starts a normal
 follow-up turn. The continue endpoint re-reads the thread and refuses the
 operation unless its latest persisted turn is still `interrupted`.
+
+## Android system notifications
+
+Notifications are opt-in per browser. The drawer button requests the browser's
+notification permission from a direct user gesture and registers `/sw.js` on
+the same origin. Once enabled, the page refreshes the bounded thread summary at
+most once every ten seconds and notifies only on a new completed, interrupted,
+or failed task update, or when the foreground Desktop task exposes a new
+approval/user-input request. Notification bodies contain the task title but no
+response text, tool output, credentials, or attachment data. Clicking a
+notification focuses an existing Codex Pocket window and opens that thread, or
+opens `/?thread=<id>` when no client window exists.
+
+This first-party implementation does not use a third-party Web Push service.
+It therefore requires the Codex Pocket page to remain open or retained as a
+background browser/PWA page. Fully terminating the Android browser stops its
+polling; supporting that case later would require a separate push subscription,
+VAPID key lifecycle, and push delivery service.
 Completed turns mark their last agent message as
 `Codex · 最终回复` even when the app-server omits the message phase. Stop-button
 taps immediately show feedback; Desktop interruption still requires explicit
@@ -116,11 +139,15 @@ requires one exact expected title, zero semantic `Stop` buttons, one empty
 `AXTextArea`, and one semantic `Send` button. It refuses to overwrite a Desktop
 draft and rechecks task identity immediately before pressing Send. Message text
 is supplied over stdin rather than command-line arguments.
+Attachment paths are also supplied over stdin, but the Helper resolves each one
+and refuses anything outside `~/Library/Application Support/MobileCodexBridge/uploads`.
+Files are pasted through the Desktop composer only after task and draft checks;
+the Helper waits for an attachment control with the exact filename before Send.
 
 Managed command and file approvals support only `accept`, `decline`, or
 `cancel`; the mobile API intentionally omits session-wide and persistent policy
-amendments. Raw reasoning, arbitrary JSON-RPC methods, image/local-file inputs
-from the phone, and general shell access remain unavailable.
+amendments. Raw reasoning, arbitrary JSON-RPC methods, arbitrary Mac file paths,
+and general shell access remain unavailable.
 
 Desktop owns every new phone-started turn and newly created task. The private
 history app-server still
@@ -178,19 +205,20 @@ curl \
   -X POST \
   -H "Authorization: Bearer $MOBILE_CODEX_BRIDGE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"confirm":true,"expectedTaskTitle":"继续项目开发"}' \
+  -d '{"confirm":true,"threadId":"019fb6fd-68d6-71f1-8d60-ea75a658d0ab","expectedTaskTitle":"继续项目开发"}' \
   http://127.0.0.1:4317/api/desktop/interrupt
 ```
 
-The bridge refuses the request unless it finds exactly one enabled AX button
-whose semantic description is `Stop` in the composer region. This action
-targets the task currently visible in the ChatGPT/Codex window.
+The bridge first opens `codex://threads/<threadId>`, then refuses the request
+unless the focused Desktop window exposes the exact expected task title and
+exactly one enabled AX button whose semantic description is `Stop` in the
+composer region.
 
-The status endpoint reads the foreground task title from the Desktop header.
-The interrupt request must echo that exact title. Immediately before pressing,
-the bridge brings ChatGPT forward, reads the title again, and refuses if it
-changed. Bringing the app forward only happens for a confirmed interrupt;
-background status polling never steals focus.
+The interrupt request must include the selected task's id and exact title.
+Immediately before pressing, the bridge reads the focused window title on both
+sides of the Stop probe and refuses if it changed. Switching and bringing the
+app forward only happen for a confirmed interrupt; background status polling
+never steals focus.
 
 When ChatGPT is covered by another app, AX coordinate hit-testing can report
 zero Stop candidates. The mobile page still permits a guarded attempt because
@@ -200,6 +228,8 @@ nothing unless exactly one semantic Stop button is found after activation.
 ## API safety properties
 
 - Loopback binding only.
+- Optional local hotspot TLS proxy with exact IP, gateway, interface, and Host allowlists.
+- A name-constrained local CA limited to the configured hotspot IP and `codex-pocket.local`.
 - Constant-time Bearer-token comparison.
 - Five-minute, single-use pairing tickets.
 - A unique random credential per device, stored only as a SHA-256 hash on Mac.

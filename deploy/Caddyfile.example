@@ -1,0 +1,32 @@
+﻿codex.example.com {
+    encode zstd gzip
+
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Content-Type-Options "nosniff"
+        X-Frame-Options "DENY"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' wss://codex.example.com"
+    }
+
+    # Preferred: expose this hostname only through Tailscale / private DNS.
+    # Optional: restrict source IPs if your proxy host already sees stable client IPs.
+    # @blocked not remote_ip 100.64.0.0/10 192.168.0.0/16
+    # respond @blocked 403
+
+    # Optional extra gate in front of app login.
+    # Uncomment after generating credentials with:
+    # caddy hash-password --plaintext 'your-strong-password'
+    #
+    # basicauth {
+    #     you@example.com JDJhJDE0JG...
+    # }
+
+    log {
+        output file /var/log/caddy/mobile-codex-access.log
+        format json
+    }
+
+    reverse_proxy 127.0.0.1:3001
+}

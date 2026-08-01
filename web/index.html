@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <meta name="theme-color" content="#f7f7f5">
     <title>Codex Pocket</title>
+    <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/app.css">
     <script src="/app.js" defer></script>
   </head>
@@ -40,7 +41,23 @@
 
       <div class="drawer-footer">
         <span id="deviceDot" class="connection-dot pending"></span>
-        <span id="deviceStatus">正在连接 Mac…</span>
+        <span class="device-summary">
+          <span id="deviceStatus">正在连接 Mac…</span>
+          <small class="device-metrics" aria-live="polite">
+            <span id="macBattery">电量 --</span>
+            <span aria-hidden="true">·</span>
+            <span id="connectionLatency" class="connection-latency">延迟 --</span>
+          </small>
+        </span>
+        <span class="drawer-footer-actions">
+          <button id="notificationButton" class="notification-toggle" type="button" aria-label="系统通知" title="系统通知">
+            <span class="notification-bell" aria-hidden="true"></span>
+            <span id="notificationStatus" class="visually-hidden">正在检查浏览器支持…</span>
+          </button>
+          <button id="localConnectionButton" class="local-connection-toggle" type="button" aria-label="热点本地直连" title="热点本地直连" hidden>
+            <span aria-hidden="true">⌁</span>
+          </button>
+        </span>
         <button id="tokenButton" class="plain-icon" type="button" aria-label="查看设备配对">•••</button>
       </div>
     </aside>
@@ -80,9 +97,11 @@
       <footer class="composer-shell">
         <div id="composerState" class="composer-state">选择任务后可查看历史</div>
         <div class="composer">
+          <div id="composerAttachments" class="composer-attachments" hidden></div>
           <textarea id="composerInput" rows="1" placeholder="后续可在这里继续任务…" disabled></textarea>
           <div class="composer-toolbar">
-            <button class="composer-tool" type="button" disabled aria-label="添加附件">＋</button>
+            <button id="attachmentButton" class="composer-tool" type="button" disabled aria-label="添加附件">＋</button>
+            <input id="attachmentInput" type="file" multiple hidden>
             <span id="composerMode">只读历史</span>
             <button id="modelSettingsButton" class="model-settings-button" type="button" disabled aria-label="更改当前任务的模型设置">
               <span id="modelSettingsLabel">模型…</span>
@@ -98,7 +117,7 @@
 
     <button id="newContentButton" class="new-content-button" type="button" hidden>
       <span aria-hidden="true">↓</span>
-      <span>下方有新内容</span>
+      <span id="latestButtonLabel">回到最新</span>
     </button>
 
     <div id="scrollRail" class="scroll-rail" hidden aria-hidden="true">
@@ -109,7 +128,7 @@
       <form method="dialog">
         <p class="dialog-eyebrow">DESKTOP CONTROL</p>
         <h2>停止当前任务？</h2>
-        <p>将停止 Mac 上正在运行的“<strong id="confirmTaskTitle"></strong>”。执行前会重新核对任务标题和唯一 Stop 控件。</p>
+        <p>Mac Desktop 会先切换到“<strong id="confirmTaskTitle"></strong>”，再核对任务标题和唯一 Stop 控件后停止。</p>
         <div class="dialog-actions">
           <button id="cancelButton" class="secondary-button" type="button">取消</button>
           <button id="confirmButton" class="danger-button" type="button">确认停止</button>
@@ -123,7 +142,13 @@
         <h2>新建任务</h2>
         <p>任务将创建在 <strong id="newTaskDestination"></strong>，并切换到 Mac 上由 Desktop 执行。</p>
         <label for="newTaskMessage">第一条指令</label>
-        <textarea id="newTaskMessage" rows="5" maxlength="20000" required placeholder="告诉 Codex 要做什么…"></textarea>
+        <textarea id="newTaskMessage" rows="5" maxlength="20000" placeholder="告诉 Codex 要做什么…"></textarea>
+        <div id="newTaskAttachments" class="composer-attachments new-task-attachments" hidden></div>
+        <div class="new-task-attachment-row">
+          <button id="newTaskAttachmentButton" class="secondary-button new-task-attachment-button" type="button">＋ 添加文件</button>
+          <input id="newTaskAttachmentInput" type="file" multiple hidden>
+          <span>最多 4 个 · 单个 20 MB</span>
+        </div>
         <p id="newTaskModelHint" class="model-option-description"></p>
         <p id="newTaskError" class="form-error" aria-live="polite"></p>
         <div class="dialog-actions">
@@ -170,6 +195,46 @@
         <div class="dialog-actions">
           <button id="tokenCancel" class="secondary-button" type="button">取消</button>
           <button class="primary-button" type="submit">连接</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="localConnectionDialog">
+      <form method="dialog">
+        <p class="dialog-eyebrow">LOCAL HOTSPOT</p>
+        <h2>热点本地直连</h2>
+        <p id="localConnectionDescription">同一手机热点下可绕过远程中继，直接连接 Mac。</p>
+        <ol id="localConnectionSteps" class="local-connection-steps">
+          <li>先下载并在 Android 系统中安装一次受限 CA 证书。</li>
+          <li>返回这里，点击“切换到本地”。</li>
+        </ol>
+        <details id="localCertificateDetails" class="local-certificate-details">
+          <summary>证书详情</summary>
+          <p class="local-ca-fingerprint">CA SHA-256：<code id="localCaFingerprint">--</code></p>
+        </details>
+        <p id="localConnectionError" class="form-error" aria-live="polite"></p>
+        <div class="local-connection-download">
+          <button id="downloadLocalCaButton" class="secondary-button" type="button">下载 CA 证书</button>
+        </div>
+        <div class="dialog-actions">
+          <button id="localConnectionCancel" class="secondary-button" type="button">取消</button>
+          <button id="localConnectionSwitch" class="primary-button" type="button">切换到本地</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="notificationHelpDialog">
+      <form method="dialog">
+        <p class="dialog-eyebrow">NOTIFICATIONS</p>
+        <h2>通知权限被阻止</h2>
+        <p id="notificationHelpMessage">浏览器已阻止这个网址的通知，网页不能自行重新弹出授权框。</p>
+        <ol class="local-connection-steps">
+          <li>点击浏览器地址栏附近的网站设置图标。</li>
+          <li>打开“权限”或“通知”，改为“允许”。</li>
+          <li>返回并刷新 Codex Pocket，再点击通知按钮。</li>
+        </ol>
+        <div class="dialog-actions single-action">
+          <button id="notificationHelpClose" class="primary-button" type="button">知道了</button>
         </div>
       </form>
     </dialog>
