@@ -58,6 +58,42 @@ def same_text(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+def read_mac_battery() -> dict[str, Any]:
+    try:
+        result = subprocess.run(
+            ["/usr/bin/pmset", "-g", "batt"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"available": False}
+    if result.returncode != 0:
+        return {"available": False}
+    match = re.search(r"\b(\d{1,3})%;\s*([^;\n]+)", result.stdout)
+    if match is None:
+        return {"available": False}
+    percent = min(100, max(0, int(match.group(1))))
+    raw_state = match.group(2).strip().lower()
+    if "discharg" in raw_state:
+        state = "discharging"
+    elif "charg" in raw_state and "charged" not in raw_state:
+        state = "charging"
+    elif "charged" in raw_state or percent >= 100:
+        state = "full"
+    else:
+        state = "unknown"
+    power_match = re.search(r"drawing from '([^']+)'", result.stdout, re.IGNORECASE)
+    power_source = power_match.group(1).strip() if power_match else ""
+    return {
+        "available": True,
+        "percent": percent,
+        "state": state,
+        "powerSource": power_source[:40],
+    }
+
+
 def thread_user_message_fingerprints(thread: dict[str, Any]) -> set[str]:
     fingerprints: set[str] = set()
     turns = thread.get("turns")
@@ -1305,6 +1341,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
                 return
             self._send_json(HTTPStatus.OK, {"ok": True, "device": device})
+            return
+        if path == "/api/system/metrics":
+            if not self._require_control_auth():
+                return
+            self._send_json(
+                HTTPStatus.OK,
+                {"ok": True, "battery": read_mac_battery()},
+            )
             return
         if path == "/api/codex/models":
             if not self._require_control_auth():

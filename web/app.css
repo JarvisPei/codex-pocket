@@ -1125,8 +1125,8 @@ body.composer-focused .composer-state { visibility: hidden; }
   transform: translateX(-50%);
 }
 .drawer-footer {
-  min-height: 46px;
-  padding: 8px 9px 0;
+  min-height: 56px;
+  padding: 7px 9px 1px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1134,12 +1134,33 @@ body.composer-focused .composer-state { visibility: hidden; }
   color: var(--muted);
   font-size: 11px;
 }
-.drawer-footer #deviceStatus {
+.device-summary {
   min-width: 0;
+  display: grid;
+  flex: 1 1 auto;
+  gap: 2px;
+  overflow: hidden;
+}
+.drawer-footer #deviceStatus {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.device-metrics {
+  display: flex;
+  gap: 4px;
+  overflow: hidden;
+  color: #969691;
+  font-size: 9px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.connection-latency.excellent,
+.connection-latency.good { color: var(--green); }
+.connection-latency.fair { color: #a46c16; }
+.connection-latency.poor,
+.connection-latency.error { color: var(--danger); }
 .drawer-footer #tokenButton { margin-left: 0; }
 
 dialog {

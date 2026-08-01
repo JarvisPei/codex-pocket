@@ -21,6 +21,7 @@ from mac_bridge import (
     TaskChangedError,
     desktop_message_landed,
     load_token,
+    read_mac_battery,
     thread_user_message_fingerprints,
 )
 
@@ -58,6 +59,33 @@ class ThreadProjectInferenceTest(unittest.TestCase):
         self.assertEqual(summary["collection"], "project")
         self.assertEqual(summary["project"]["id"], "mobile")
         self.assertEqual(summary["project"]["name"], "Mobile Project")
+
+
+class MacBatteryTest(unittest.TestCase):
+    @patch("mac_bridge.subprocess.run")
+    def test_reads_percentage_and_power_state(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stdout = (
+            "Now drawing from 'AC Power'\n"
+            " -InternalBattery-0 (id=1) 52%; discharging; 4:18 remaining\n"
+        )
+
+        self.assertEqual(
+            read_mac_battery(),
+            {
+                "available": True,
+                "percent": 52,
+                "state": "discharging",
+                "powerSource": "AC Power",
+            },
+        )
+
+    @patch("mac_bridge.subprocess.run")
+    def test_reports_unavailable_when_no_internal_battery_is_present(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "Now drawing from 'AC Power'\n"
+
+        self.assertEqual(read_mac_battery(), {"available": False})
 
 
 class DesktopMessageConfirmationTest(unittest.TestCase):
@@ -899,6 +927,26 @@ class BridgeApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(payload["ok"])
 
+    @patch("mac_bridge.read_mac_battery")
+    def test_system_metrics_requires_auth_and_returns_battery(self, battery):
+        battery.return_value = {
+            "available": True,
+            "percent": 52,
+            "state": "discharging",
+            "powerSource": "AC Power",
+        }
+        status, payload = self.request("GET", "/api/system/metrics")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["battery"]["percent"], 52)
+
+        status, payload = self.request(
+            "GET",
+            "/api/system/metrics",
+            authorized=False,
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"], "unauthorized")
+
     def test_mobile_page_is_served_with_security_policy(self):
         self.connection.request("GET", "/")
         response = self.connection.getresponse()
@@ -917,6 +965,8 @@ class BridgeApiTest(unittest.TestCase):
         self.assertNotIn("新建任务（即将开放）", body)
         self.assertIn("Usage remaining", body)
         self.assertIn("notificationButton", body)
+        self.assertIn("macBattery", body)
+        self.assertIn("connectionLatency", body)
         self.assertIn("manifest.webmanifest", body)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
         self.assertIn("worker-src 'self'", response.getheader("Content-Security-Policy"))

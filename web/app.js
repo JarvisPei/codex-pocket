@@ -13,6 +13,8 @@ const elements = {
   notificationStatus: document.querySelector("#notificationStatus"),
   deviceDot: document.querySelector("#deviceDot"),
   deviceStatus: document.querySelector("#deviceStatus"),
+  macBattery: document.querySelector("#macBattery"),
+  connectionLatency: document.querySelector("#connectionLatency"),
   selectedProjectName: document.querySelector("#selectedProjectName"),
   selectedThreadTitle: document.querySelector("#selectedThreadTitle"),
   liveBadge: document.querySelector("#liveBadge"),
@@ -132,6 +134,9 @@ let statusRefreshPromise;
 let drawerStatusRefreshPromise;
 let usageRefreshPromise;
 let usageLastRefreshedAt = 0;
+let systemMetricsRefreshPromise;
+let systemMetricsLastRefreshedAt = 0;
+const bridgeLatencySamples = [];
 let isSendingMessage = false;
 let isUploadingAttachments = false;
 let isCreatingTask = false;
@@ -175,6 +180,112 @@ function setDeviceState(kind, label) {
 
 function authorizationHeaders() {
   return { Authorization: `Bearer ${deviceToken}` };
+}
+
+function renderMacBattery(battery) {
+  if (!battery?.available || !Number.isFinite(Number(battery.percent))) {
+    elements.macBattery.textContent = "电量不可用";
+    return;
+  }
+  const percent = Math.min(100, Math.max(0, Math.round(Number(battery.percent))));
+  const state = {
+    charging: "充电",
+    discharging: "放电",
+    full: "已满",
+  }[battery.state] || "";
+  elements.macBattery.textContent = `电量 ${percent}%${state ? ` · ${state}` : ""}`;
+}
+
+function renderConnectionLatency(milliseconds) {
+  elements.connectionLatency.className = "connection-latency";
+  if (!Number.isFinite(milliseconds)) {
+    elements.connectionLatency.classList.add("error");
+    elements.connectionLatency.textContent = "延迟不可用";
+    return;
+  }
+  const rounded = Math.max(1, Math.round(milliseconds));
+  let quality = "较弱";
+  let qualityClass = "poor";
+  if (rounded <= 80) {
+    quality = "优秀";
+    qualityClass = "excellent";
+  } else if (rounded <= 180) {
+    quality = "良好";
+    qualityClass = "good";
+  } else if (rounded <= 400) {
+    quality = "一般";
+    qualityClass = "fair";
+  }
+  elements.connectionLatency.classList.add(qualityClass);
+  elements.connectionLatency.textContent = `延迟 ${rounded} ms · ${quality}`;
+}
+
+async function fetchWithTimeout(url, options = {}, timeoutMs = 5_000) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+async function measureBridgeLatency() {
+  const startedAt = performance.now();
+  const response = await fetchWithTimeout(
+    `/health?probe=${Date.now()}`,
+    { cache: "no-store" },
+  );
+  if (!response.ok) throw new Error("health probe failed");
+  await response.json();
+  return performance.now() - startedAt;
+}
+
+async function refreshSystemMetrics(force = false) {
+  if (!deviceToken || systemMetricsRefreshPromise) return systemMetricsRefreshPromise;
+  if (!force && Date.now() - systemMetricsLastRefreshedAt < 10_000) return;
+  systemMetricsRefreshPromise = (async () => {
+    const [latencyResult, metricsResult] = await Promise.allSettled([
+      measureBridgeLatency(),
+      fetchWithTimeout("/api/system/metrics", {
+        headers: authorizationHeaders(),
+        cache: "no-store",
+      }),
+    ]);
+    if (latencyResult.status === "fulfilled") {
+      bridgeLatencySamples.push(latencyResult.value);
+      if (bridgeLatencySamples.length > 5) bridgeLatencySamples.shift();
+      const sorted = [...bridgeLatencySamples].sort((left, right) => left - right);
+      renderConnectionLatency(sorted[Math.floor(sorted.length / 2)]);
+    } else {
+      renderConnectionLatency(Number.NaN);
+    }
+    if (metricsResult.status === "fulfilled") {
+      const response = metricsResult.value;
+      if (response.status === 401) {
+        handleUnauthorized();
+        return;
+      }
+      if (response.ok) {
+        try {
+          const result = await response.json();
+          renderMacBattery(result.battery);
+        } catch {
+          renderMacBattery(undefined);
+        }
+      } else {
+        renderMacBattery(undefined);
+      }
+    } else {
+      renderMacBattery(undefined);
+    }
+    systemMetricsLastRefreshedAt = Date.now();
+  })();
+  try {
+    return await systemMetricsRefreshPromise;
+  } finally {
+    systemMetricsRefreshPromise = undefined;
+  }
 }
 
 function notificationSupportAvailable() {
@@ -355,6 +466,7 @@ function openDrawer() {
   elements.drawerScrim.hidden = false;
   refreshDrawerThreadStates();
   refreshUsage();
+  refreshSystemMetrics();
 }
 
 function closeDrawer() {
@@ -3789,6 +3901,7 @@ drawerStatusPollTimer = window.setInterval(() => {
   }
   if (elements.projectDrawer.classList.contains("open")) {
     refreshUsage();
+    refreshSystemMetrics();
   }
 }, 10_000);
 elements.scrollRail.addEventListener("pointerdown", startScrollDrag);
