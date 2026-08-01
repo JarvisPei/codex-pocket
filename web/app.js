@@ -9,6 +9,8 @@ const elements = {
   projectGroups: document.querySelector("#projectGroups"),
   refreshUsageButton: document.querySelector("#refreshUsageButton"),
   usageContent: document.querySelector("#usageContent"),
+  notificationButton: document.querySelector("#notificationButton"),
+  notificationStatus: document.querySelector("#notificationStatus"),
   deviceDot: document.querySelector("#deviceDot"),
   deviceStatus: document.querySelector("#deviceStatus"),
   selectedProjectName: document.querySelector("#selectedProjectName"),
@@ -79,6 +81,7 @@ const LEGACY_TOKEN_KEY = "mobileCodexBridgeToken";
 const PAIRING_TICKET_KEY = "mobileCodexPairingTicket";
 const SELECTED_THREAD_KEY = "mobileCodexSelectedThread";
 const COLLAPSED_PROJECTS_KEY = "mobileCodexCollapsedProjects";
+const NOTIFICATIONS_ENABLED_KEY = "mobileCodexNotificationsEnabled";
 const INITIAL_HISTORY_TURNS = 30;
 const MAX_HISTORY_TURNS = 60;
 const THREAD_CACHE_TTL_MS = 60_000;
@@ -142,6 +145,11 @@ let desktopActivityEvidence;
 let hasUnseenNewContent = false;
 let isScrollingToLatest = false;
 let modelSettingsLoadingThreadId = "";
+let notificationsEnabled = localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) === "true";
+let serviceWorkerRegistrationPromise;
+let notificationThreadId = new URLSearchParams(window.location.search).get("thread") || "";
+let threadNotificationsPrimed = false;
+let desktopRequestNotificationsPrimed = false;
 const completedRunsSeen = new Set();
 const persistedManagedTurnIds = new Set();
 const threadDrafts = new Map();
@@ -150,6 +158,7 @@ const threadHistoryCache = new Map();
 const renderedThreadSignatures = new Map();
 const modelSettingsCache = new Map();
 const expandedWorkedGroups = new Set();
+const threadNotificationStates = new Map();
 let collapsedProjects = (() => {
   try {
     const stored = JSON.parse(localStorage.getItem(COLLAPSED_PROJECTS_KEY) || "[]");
@@ -166,6 +175,166 @@ function setDeviceState(kind, label) {
 
 function authorizationHeaders() {
   return { Authorization: `Bearer ${deviceToken}` };
+}
+
+function notificationSupportAvailable() {
+  return Boolean(
+    window.isSecureContext
+    && "Notification" in window
+    && "serviceWorker" in navigator,
+  );
+}
+
+function registerNotificationWorker() {
+  if (!notificationSupportAvailable()) return Promise.resolve(undefined);
+  if (!serviceWorkerRegistrationPromise) {
+    serviceWorkerRegistrationPromise = navigator.serviceWorker.register("/sw.js");
+  }
+  return serviceWorkerRegistrationPromise;
+}
+
+function renderNotificationState() {
+  elements.notificationButton.classList.remove("enabled", "blocked");
+  if (!notificationSupportAvailable()) {
+    elements.notificationButton.classList.add("blocked");
+    elements.notificationStatus.textContent = "当前浏览器不支持";
+    return;
+  }
+  if (Notification.permission === "denied") {
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+    elements.notificationButton.classList.add("blocked");
+    elements.notificationStatus.textContent = "已被浏览器阻止，请在网站设置中允许";
+    return;
+  }
+  if (notificationsEnabled && Notification.permission !== "granted") {
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+  }
+  if (notificationsEnabled && Notification.permission === "granted") {
+    elements.notificationButton.classList.add("enabled");
+    elements.notificationStatus.textContent = "已开启 · 页面留在后台即可提醒";
+    return;
+  }
+  elements.notificationStatus.textContent = Notification.permission === "granted"
+    ? "已关闭 · 点此开启"
+    : "点此开启";
+}
+
+async function showSystemNotification(title, options = {}) {
+  if (
+    !notificationsEnabled
+    || !notificationSupportAvailable()
+    || Notification.permission !== "granted"
+  ) return;
+  try {
+    const registration = await registerNotificationWorker();
+    if (!registration) return;
+    await registration.showNotification(title, {
+      body: options.body || "",
+      tag: options.tag || "codex-pocket",
+      data: {
+        threadId: options.threadId || "",
+        url: options.threadId
+          ? `/?thread=${encodeURIComponent(options.threadId)}`
+          : "/",
+      },
+    });
+  } catch {
+    // Notification delivery is best effort; task polling must keep running.
+  }
+}
+
+function threadNotificationState(thread) {
+  const activityStatus = String(thread?.activityStatus || "");
+  return {
+    title: String(thread?.title || "未命名任务"),
+    activityStatus,
+    updatedAt: String(thread?.updatedAt || ""),
+    running: activityStatus === "inProgress",
+  };
+}
+
+function observeThreadNotificationStates(nextThreads, { prime = false } = {}) {
+  const nextIds = new Set();
+  for (const thread of nextThreads || []) {
+    if (!thread?.id) continue;
+    const threadId = String(thread.id);
+    nextIds.add(threadId);
+    const next = threadNotificationState(thread);
+    const previous = threadNotificationStates.get(threadId);
+    threadNotificationStates.set(threadId, next);
+    if (prime || !threadNotificationsPrimed || !previous || next.running) {
+      continue;
+    }
+    const observedTerminalTransition = previous.running;
+    const observedNewTerminalUpdate = Boolean(
+      previous.updatedAt
+      && next.updatedAt
+      && previous.updatedAt !== next.updatedAt,
+    );
+    if (!observedTerminalTransition && !observedNewTerminalUpdate) continue;
+    const eventIdentity = next.updatedAt || Date.now();
+    if (next.activityStatus === "completed") {
+      showSystemNotification("Codex 任务已完成", {
+        body: next.title,
+        threadId,
+        tag: `codex-completed-${threadId}-${eventIdentity}`,
+      });
+    } else if (next.activityStatus === "interrupted") {
+      showSystemNotification("Codex 任务已暂停", {
+        body: next.title,
+        threadId,
+        tag: `codex-interrupted-${threadId}-${eventIdentity}`,
+      });
+    } else if (next.activityStatus === "failed") {
+      showSystemNotification("Codex 任务失败", {
+        body: next.title,
+        threadId,
+        tag: `codex-failed-${threadId}-${eventIdentity}`,
+      });
+    }
+  }
+  for (const threadId of threadNotificationStates.keys()) {
+    if (!nextIds.has(threadId)) threadNotificationStates.delete(threadId);
+  }
+  if (prime || !threadNotificationsPrimed) threadNotificationsPrimed = true;
+}
+
+async function toggleSystemNotifications() {
+  if (!notificationSupportAvailable()) {
+    renderNotificationState();
+    return;
+  }
+  if (notificationsEnabled && Notification.permission === "granted") {
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+    renderNotificationState();
+    return;
+  }
+  let permission = Notification.permission;
+  if (permission === "default") permission = await Notification.requestPermission();
+  if (permission !== "granted") {
+    notificationsEnabled = false;
+    localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
+    renderNotificationState();
+    return;
+  }
+  try {
+    await registerNotificationWorker();
+  } catch {
+    elements.notificationButton.classList.add("blocked");
+    elements.notificationStatus.textContent = "通知服务注册失败，请刷新后重试";
+    return;
+  }
+  notificationsEnabled = true;
+  localStorage.setItem(NOTIFICATIONS_ENABLED_KEY, "true");
+  observeThreadNotificationStates(threads, { prime: true });
+  renderNotificationState();
+  await showSystemNotification("Codex Pocket 通知已开启", {
+    body: "任务完成、暂停或需要确认时会提醒你。",
+    tag: "codex-notifications-enabled",
+  });
 }
 
 function defaultDeviceName() {
@@ -199,6 +368,9 @@ function updateProjectsHint() {
 
 function reconcileThreadCatalog(result) {
   if (!Array.isArray(result.projects) || !Array.isArray(result.threads)) return false;
+  observeThreadNotificationStates(result.threads, {
+    prime: !threadNotificationsPrimed,
+  });
   projects = result.projects;
   const existing = new Map(threads.map((thread) => [thread.id, thread]));
   threads = result.threads.map((update) => {
@@ -226,7 +398,7 @@ async function refreshDrawerThreadStates() {
       if (!response.ok) return;
       const result = await response.json();
       if (!reconcileThreadCatalog(result)) return;
-      renderProjectGroups();
+      if (elements.projectDrawer.classList.contains("open")) renderProjectGroups();
     } catch {
       // Keep the last known drawer state; the main status indicator reports outages.
     }
@@ -3235,11 +3407,17 @@ async function loadThreads() {
 
     const remembered = localStorage.getItem(SELECTED_THREAD_KEY);
     const initialId = (
+      threads.some((thread) => thread.id === notificationThreadId) && notificationThreadId
+    ) || (
       threads.some((thread) => thread.id === remembered) && remembered
     ) || uniqueCurrentThreadId() || threads[0]?.id;
     if (initialId) {
       try {
         await openThread(initialId);
+        if (notificationThreadId) {
+          notificationThreadId = "";
+          history.replaceState(null, "", window.location.pathname);
+        }
       } catch {
         // The catalog is already valid; conversation loading reports its own error.
       }
@@ -3275,6 +3453,19 @@ async function refreshStatusOnce() {
     currentStopCandidates = Number(status.stopCandidates) || 0;
     desktopStatusKnown = true;
     desktopRequest = status.request || undefined;
+    const nextRequestFingerprint = desktopRequest?.fingerprint || "";
+    if (
+      desktopRequestNotificationsPrimed
+      && nextRequestFingerprint
+      && nextRequestFingerprint !== previousRequestFingerprint
+    ) {
+      showSystemNotification("Codex 需要你的确认", {
+        body: currentTaskTitle || "打开 Codex Pocket 查看请求",
+        threadId: uniqueCurrentThreadId(),
+        tag: `codex-request-${nextRequestFingerprint}`,
+      });
+    }
+    desktopRequestNotificationsPrimed = true;
     const foregroundThreadId = uniqueCurrentThreadId();
     if (
       currentStopCandidates === 1
@@ -3315,7 +3506,7 @@ async function refreshStatusOnce() {
         || previousStopCandidates !== currentStopCandidates
       )
     ) renderProjectGroups();
-    if (previousRequestFingerprint !== (desktopRequest?.fingerprint || "")) {
+    if (previousRequestFingerprint !== nextRequestFingerprint) {
       managedRenderSignature = "";
       renderManagedRun();
     }
@@ -3462,6 +3653,7 @@ elements.drawerScrim.addEventListener("click", closeDrawer);
 elements.newContentButton.addEventListener("click", () => scrollToLatest("smooth"));
 elements.refreshThreadsButton.addEventListener("click", loadThreads);
 elements.refreshUsageButton.addEventListener("click", () => refreshUsage(true));
+elements.notificationButton.addEventListener("click", toggleSystemNotifications);
 elements.refreshConversationButton.addEventListener("click", refreshCurrentConversation);
 elements.modelSettingsButton.addEventListener("click", openModelSettingsDialog);
 elements.attachmentButton.addEventListener("click", () => {
@@ -3569,6 +3761,13 @@ elements.tokenForm.addEventListener("submit", (event) => {
   Promise.all([refreshStatus(), loadThreads()]);
 });
 
+renderNotificationState();
+registerNotificationWorker().catch(() => {
+  if (notificationsEnabled) {
+    elements.notificationButton.classList.add("blocked");
+    elements.notificationStatus.textContent = "通知服务注册失败，请刷新后重试";
+  }
+});
 Promise.all([refreshStatus(), loadThreads()]);
 refreshTimer = window.setInterval(refreshStatus, 3000);
 managedPollTimer = window.setInterval(() => {
@@ -3579,8 +3778,10 @@ desktopHistoryPollTimer = window.setInterval(
   5_000,
 );
 drawerStatusPollTimer = window.setInterval(() => {
-  if (elements.projectDrawer.classList.contains("open")) {
+  if (elements.projectDrawer.classList.contains("open") || notificationsEnabled) {
     refreshDrawerThreadStates();
+  }
+  if (elements.projectDrawer.classList.contains("open")) {
     refreshUsage();
   }
 }, 10_000);
@@ -3614,6 +3815,18 @@ document.addEventListener("visibilitychange", () => {
   }
   if (elements.projectDrawer.classList.contains("open")) {
     refreshDrawerThreadStates();
+  }
+});
+navigator.serviceWorker?.addEventListener("message", (event) => {
+  if (event.data?.type !== "open-thread" || typeof event.data.threadId !== "string") {
+    return;
+  }
+  const threadId = event.data.threadId;
+  if (threads.some((thread) => thread.id === threadId)) {
+    openThread(threadId, { fresh: true });
+  } else {
+    notificationThreadId = threadId;
+    loadThreads();
   }
 });
 window.visualViewport?.addEventListener("resize", () => {

@@ -902,7 +902,28 @@ class BridgeApiTest(unittest.TestCase):
         self.assertIn("newTaskDialog", body)
         self.assertNotIn("新建任务（即将开放）", body)
         self.assertIn("Usage remaining", body)
+        self.assertIn("notificationButton", body)
+        self.assertIn("manifest.webmanifest", body)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
+        self.assertIn("worker-src 'self'", response.getheader("Content-Security-Policy"))
+
+    def test_notification_worker_and_manifest_are_served(self):
+        self.connection.request("GET", "/sw.js")
+        worker_response = self.connection.getresponse()
+        worker_body = worker_response.read().decode()
+        self.assertEqual(worker_response.status, 200)
+        self.assertEqual(
+            worker_response.getheader("Content-Type"),
+            "text/javascript; charset=utf-8",
+        )
+        self.assertIn("notificationclick", worker_body)
+
+        self.connection.request("GET", "/manifest.webmanifest")
+        manifest_response = self.connection.getresponse()
+        manifest = json.loads(manifest_response.read())
+        self.assertEqual(manifest_response.status, 200)
+        self.assertEqual(manifest["name"], "Codex Pocket")
+        self.assertEqual(manifest["display"], "standalone")
 
     def test_large_assets_are_gzip_compressed_when_supported(self):
         self.connection.request(

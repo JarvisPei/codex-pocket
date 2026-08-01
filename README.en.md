@@ -19,6 +19,9 @@ Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own ta
 - Handle one-shot command/file approvals and structured user questions.
 - Pair with a five-minute single-use QR ticket and revoke individual devices.
 - Refresh long conversations incrementally with a new-content indicator and draggable scrollbar.
+- Optionally show Android system notifications when a task completes, pauses, or needs confirmation; tapping returns to that task.
+
+System notifications are off by default and must be enabled from the mobile drawer. They contain only the task title and state, never response text. This implementation requires the Codex Pocket page to remain open or in the browser background; fully terminating the browser stops polling, and no notification content is sent to a third-party push service.
 
 ## Architecture
 

@@ -1158,7 +1158,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         self.send_header(
             "Content-Security-Policy",
             "default-src 'self'; script-src 'self'; style-src 'self'; "
-            "img-src 'self'; connect-src 'self'; frame-ancestors 'none'; "
+            "img-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'none'",
         )
         self.end_headers()
@@ -1278,6 +1278,15 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if path == "/app.js":
             self._serve_asset("app.js", "text/javascript; charset=utf-8")
+            return
+        if path == "/sw.js":
+            self._serve_asset("sw.js", "text/javascript; charset=utf-8")
+            return
+        if path == "/manifest.webmanifest":
+            self._serve_asset(
+                "manifest.webmanifest",
+                "application/manifest+json; charset=utf-8",
+            )
             return
         if path == "/health":
             self._send_json(HTTPStatus.OK, {"ok": True, "service": "mac-codex-bridge"})

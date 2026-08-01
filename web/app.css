@@ -1069,6 +1069,38 @@ body.composer-focused .composer-state { visibility: hidden; }
   background: #45a873;
 }
 .usage-reset { color: #969691; font-size: 9px; }
+.notification-card {
+  width: calc(100% - 8px);
+  min-height: 54px;
+  margin: 6px 4px 8px;
+  padding: 9px 11px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) 16px;
+  align-items: center;
+  gap: 9px;
+  border: 1px solid #dedfdf;
+  border-radius: 13px;
+  color: #52524e;
+  background: rgba(255, 255, 255, 0.72);
+  text-align: left;
+}
+.notification-card:active { background: #ededeb; }
+.notification-card.enabled .notification-icon { color: var(--green); }
+.notification-card.blocked .notification-icon { color: var(--danger); }
+.notification-icon { color: #aaa9a5; font-size: 13px; }
+.notification-copy { min-width: 0; }
+.notification-copy strong,
+.notification-copy small { display: block; }
+.notification-copy strong { font-size: 11px; font-weight: 760; }
+.notification-copy small {
+  margin-top: 3px;
+  overflow: hidden;
+  color: #969691;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.notification-chevron { color: #aaa9a5; font-size: 20px; }
 .drawer-footer {
   min-height: 46px;
   padding: 8px 9px 0;

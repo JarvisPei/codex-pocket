@@ -108,6 +108,24 @@ action becomes a Continue triangle and presses Desktop's semantic Continue/Send
 control without adding a user message. Typed text still starts a normal
 follow-up turn. The continue endpoint re-reads the thread and refuses the
 operation unless its latest persisted turn is still `interrupted`.
+
+## Android system notifications
+
+Notifications are opt-in per browser. The drawer button requests the browser's
+notification permission from a direct user gesture and registers `/sw.js` on
+the same origin. Once enabled, the page refreshes the bounded thread summary at
+most once every ten seconds and notifies only on a new completed, interrupted,
+or failed task update, or when the foreground Desktop task exposes a new
+approval/user-input request. Notification bodies contain the task title but no
+response text, tool output, credentials, or attachment data. Clicking a
+notification focuses an existing Codex Pocket window and opens that thread, or
+opens `/?thread=<id>` when no client window exists.
+
+This first-party implementation does not use a third-party Web Push service.
+It therefore requires the Codex Pocket page to remain open or retained as a
+background browser/PWA page. Fully terminating the Android browser stops its
+polling; supporting that case later would require a separate push subscription,
+VAPID key lifecycle, and push delivery service.
 Completed turns mark their last agent message as
 `Codex · 最终回复` even when the app-server omits the message phase. Stop-button
 taps immediately show feedback; Desktop interruption still requires explicit
