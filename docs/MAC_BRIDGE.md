@@ -46,8 +46,11 @@ the helper source changes, macOS may require removing the old Accessibility
 entry and adding the rebuilt app again because its local code signature changed.
 
 The server refuses non-loopback binds. Put Tailscale Serve or another reviewed
-private reverse proxy in front of `127.0.0.1:4317`; do not bind it directly to a
-LAN or public interface.
+private reverse proxy in front of `127.0.0.1:4317`; do not bind the Bridge
+itself directly to a LAN or public interface. The optional
+`local_hotspot_proxy.py` is a separate TLS-only reverse proxy. It activates only
+when its configured private listen address, default gateway, and interface all
+match, validates the HTTP Host, and can only forward to loopback.
 
 The process that starts the bridge needs macOS Accessibility permission because
 the bridge invokes `scripts/codex-ax.swift`.
@@ -225,6 +228,8 @@ nothing unless exactly one semantic Stop button is found after activation.
 ## API safety properties
 
 - Loopback binding only.
+- Optional local hotspot TLS proxy with exact IP, gateway, interface, and Host allowlists.
+- A name-constrained local CA limited to the configured hotspot IP and `codex-pocket.local`.
 - Constant-time Bearer-token comparison.
 - Five-minute, single-use pairing tickets.
 - A unique random credential per device, stored only as a SHA-256 hash on Mac.

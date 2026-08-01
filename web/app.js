@@ -11,6 +11,7 @@ const elements = {
   usageContent: document.querySelector("#usageContent"),
   notificationButton: document.querySelector("#notificationButton"),
   notificationStatus: document.querySelector("#notificationStatus"),
+  localConnectionButton: document.querySelector("#localConnectionButton"),
   deviceDot: document.querySelector("#deviceDot"),
   deviceStatus: document.querySelector("#deviceStatus"),
   macBattery: document.querySelector("#macBattery"),
@@ -76,6 +77,18 @@ const elements = {
   tokenError: document.querySelector("#tokenError"),
   tokenButton: document.querySelector("#tokenButton"),
   tokenCancel: document.querySelector("#tokenCancel"),
+  localConnectionDialog: document.querySelector("#localConnectionDialog"),
+  localConnectionDescription: document.querySelector("#localConnectionDescription"),
+  localConnectionSteps: document.querySelector("#localConnectionSteps"),
+  localCertificateDetails: document.querySelector("#localCertificateDetails"),
+  localCaFingerprint: document.querySelector("#localCaFingerprint"),
+  localConnectionError: document.querySelector("#localConnectionError"),
+  downloadLocalCaButton: document.querySelector("#downloadLocalCaButton"),
+  localConnectionCancel: document.querySelector("#localConnectionCancel"),
+  localConnectionSwitch: document.querySelector("#localConnectionSwitch"),
+  notificationHelpDialog: document.querySelector("#notificationHelpDialog"),
+  notificationHelpMessage: document.querySelector("#notificationHelpMessage"),
+  notificationHelpClose: document.querySelector("#notificationHelpClose"),
 };
 
 const DEVICE_TOKEN_KEY = "mobileCodexDeviceToken";
@@ -84,20 +97,35 @@ const PAIRING_TICKET_KEY = "mobileCodexPairingTicket";
 const SELECTED_THREAD_KEY = "mobileCodexSelectedThread";
 const COLLAPSED_PROJECTS_KEY = "mobileCodexCollapsedProjects";
 const NOTIFICATIONS_ENABLED_KEY = "mobileCodexNotificationsEnabled";
+const REMOTE_ORIGIN_KEY = "codexPocketRemoteOrigin";
 const INITIAL_HISTORY_TURNS = 30;
 const MAX_HISTORY_TURNS = 60;
 const THREAD_CACHE_TTL_MS = 60_000;
+const THREAD_SESSION_CACHE_KEY = "codexPocketSelectedThreadHistoryV1";
+const THREAD_SESSION_CACHE_MAX_CHARS = 1_500_000;
+const PROJECT_THREAD_PREVIEW_LIMIT = 5;
 const MAX_ATTACHMENTS_PER_TURN = 4;
 const MAX_ATTACHMENT_BYTES = 20 * 1024 * 1024;
 
 const fragmentParameters = new URLSearchParams(window.location.hash.slice(1));
 const pairedLegacyToken = fragmentParameters.get("token") || "";
 const pairedTicket = fragmentParameters.get("pairing") || "";
+const pairedRemoteOrigin = fragmentParameters.get("remote") || "";
 if (pairedLegacyToken.length >= 32) {
   sessionStorage.setItem(LEGACY_TOKEN_KEY, pairedLegacyToken);
 }
 if (pairedTicket.startsWith("pair1.")) {
   sessionStorage.setItem(PAIRING_TICKET_KEY, pairedTicket);
+}
+if (pairedTicket.startsWith("pair1.") && pairedRemoteOrigin) {
+  try {
+    const remote = new URL(pairedRemoteOrigin);
+    if (remote.protocol === "https:" && remote.origin === pairedRemoteOrigin) {
+      localStorage.setItem(REMOTE_ORIGIN_KEY, remote.origin);
+    }
+  } catch {
+    // Ignore malformed handoff metadata; pairing itself can still proceed.
+  }
 }
 if (window.location.hash) {
   history.replaceState(
@@ -136,6 +164,7 @@ let usageRefreshPromise;
 let usageLastRefreshedAt = 0;
 let systemMetricsRefreshPromise;
 let systemMetricsLastRefreshedAt = 0;
+let localHotspotStatus = { configured: false, active: false };
 const bridgeLatencySamples = [];
 let isSendingMessage = false;
 let isUploadingAttachments = false;
@@ -152,6 +181,7 @@ let isScrollingToLatest = false;
 let modelSettingsLoadingThreadId = "";
 let notificationsEnabled = localStorage.getItem(NOTIFICATIONS_ENABLED_KEY) === "true";
 let serviceWorkerRegistrationPromise;
+let notificationBlockedReason = "";
 let notificationThreadId = new URLSearchParams(window.location.search).get("thread") || "";
 let threadNotificationsPrimed = false;
 let desktopRequestNotificationsPrimed = false;
@@ -161,9 +191,11 @@ const threadDrafts = new Map();
 const threadAttachments = new Map();
 const threadHistoryCache = new Map();
 const renderedThreadSignatures = new Map();
+let renderedThreadId = "";
 const modelSettingsCache = new Map();
 const expandedWorkedGroups = new Set();
 const threadNotificationStates = new Map();
+const expandedProjectThreadLists = new Set();
 let collapsedProjects = (() => {
   try {
     const stored = JSON.parse(localStorage.getItem(COLLAPSED_PROJECTS_KEY) || "[]");
@@ -176,6 +208,29 @@ let collapsedProjects = (() => {
 function setDeviceState(kind, label) {
   elements.deviceDot.className = `connection-dot ${kind}`;
   elements.deviceStatus.textContent = label;
+}
+
+function usingLocalHotspotOrigin() {
+  if (!localHotspotStatus?.url) return false;
+  try {
+    return new URL(localHotspotStatus.url).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+function renderLocalConnectionState(status) {
+  localHotspotStatus = status?.configured
+    ? status
+    : { configured: false, active: false };
+  elements.localConnectionButton.hidden = !localHotspotStatus.configured;
+  const local = usingLocalHotspotOrigin();
+  elements.localConnectionButton.classList.toggle("active", local);
+  elements.localConnectionButton.title = local
+    ? "正在使用热点本地直连"
+    : localHotspotStatus.active
+      ? "热点本地直连可用"
+      : "热点本地直连当前不可用";
 }
 
 function authorizationHeaders() {
@@ -217,7 +272,7 @@ function renderConnectionLatency(milliseconds) {
     qualityClass = "fair";
   }
   elements.connectionLatency.classList.add(qualityClass);
-  elements.connectionLatency.textContent = `延迟 ${rounded} ms · ${quality}`;
+  elements.connectionLatency.textContent = `延迟 ${rounded} ms`;
 }
 
 async function fetchWithTimeout(url, options = {}, timeoutMs = 5_000) {
@@ -270,14 +325,18 @@ async function refreshSystemMetrics(force = false) {
         try {
           const result = await response.json();
           renderMacBattery(result.battery);
+          renderLocalConnectionState(result.localHotspot);
         } catch {
           renderMacBattery(undefined);
+          renderLocalConnectionState(undefined);
         }
       } else {
         renderMacBattery(undefined);
+        renderLocalConnectionState(undefined);
       }
     } else {
       renderMacBattery(undefined);
+      renderLocalConnectionState(undefined);
     }
     systemMetricsLastRefreshedAt = Date.now();
   })();
@@ -285,6 +344,90 @@ async function refreshSystemMetrics(force = false) {
     return await systemMetricsRefreshPromise;
   } finally {
     systemMetricsRefreshPromise = undefined;
+  }
+}
+
+function openLocalConnectionDialog() {
+  const local = usingLocalHotspotOrigin();
+  elements.localConnectionError.textContent = "";
+  elements.localCaFingerprint.textContent = localHotspotStatus.caSha256 || "--";
+  elements.downloadLocalCaButton.hidden = local;
+  elements.localConnectionSteps.hidden = local;
+  elements.localCertificateDetails.hidden = local;
+  elements.localCertificateDetails.open = false;
+  if (local) {
+    const remoteOrigin = localStorage.getItem(REMOTE_ORIGIN_KEY) || "";
+    elements.localConnectionDescription.textContent = remoteOrigin
+      ? "当前正在通过热点局域网直连 Mac；需要时可以切回 Tailscale 地址。"
+      : "当前正在通过热点局域网直连 Mac。";
+    elements.localConnectionSwitch.textContent = "切回远程";
+    elements.localConnectionSwitch.disabled = !remoteOrigin;
+  } else {
+    elements.localConnectionDescription.textContent = localHotspotStatus.active
+      ? "已检测到配置过的手机热点，可绕过远程中继直接连接 Mac。"
+      : "本地入口已配置，但当前网络与手机热点不匹配。";
+    elements.localConnectionSwitch.textContent = "切换到本地";
+    elements.localConnectionSwitch.disabled = !localHotspotStatus.active;
+  }
+  if (!elements.localConnectionDialog.open) {
+    elements.localConnectionDialog.showModal();
+  }
+}
+
+async function downloadLocalCa() {
+  elements.localConnectionError.textContent = "";
+  elements.downloadLocalCaButton.disabled = true;
+  try {
+    const response = await fetch("/api/local-hotspot/ca", {
+      headers: authorizationHeaders(),
+      cache: "no-store",
+    });
+    if (!response.ok) throw new Error("CA unavailable");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "codex-pocket-local-ca.cer";
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    window.setTimeout(() => URL.revokeObjectURL(url), 2_000);
+  } catch {
+    elements.localConnectionError.textContent = "证书下载失败，请刷新后重试。";
+  } finally {
+    elements.downloadLocalCaButton.disabled = false;
+  }
+}
+
+async function switchLocalConnection() {
+  elements.localConnectionError.textContent = "";
+  if (usingLocalHotspotOrigin()) {
+    const remoteOrigin = localStorage.getItem(REMOTE_ORIGIN_KEY) || "";
+    if (remoteOrigin) window.location.assign(remoteOrigin);
+    return;
+  }
+  if (!localHotspotStatus.active || !localHotspotStatus.url) {
+    elements.localConnectionError.textContent = "当前没有连接已配置的手机热点。";
+    return;
+  }
+  elements.localConnectionSwitch.disabled = true;
+  try {
+    const response = await fetch("/api/devices/handoff-ticket", {
+      method: "POST",
+      headers: authorizationHeaders(),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.pairingTicket) throw new Error("handoff failed");
+    const target = new URL(localHotspotStatus.url);
+    const fragment = new URLSearchParams({
+      pairing: result.pairingTicket,
+      remote: window.location.origin,
+    });
+    target.hash = fragment.toString();
+    window.location.assign(target.toString());
+  } catch {
+    elements.localConnectionError.textContent = "无法创建本地切换票据，请刷新后重试。";
+    elements.localConnectionSwitch.disabled = false;
   }
 }
 
@@ -311,13 +454,16 @@ function setNotificationButtonState(label) {
 }
 
 function renderNotificationState() {
+  notificationBlockedReason = "";
   elements.notificationButton.classList.remove("enabled", "blocked");
   if (!notificationSupportAvailable()) {
+    notificationBlockedReason = "unsupported";
     elements.notificationButton.classList.add("blocked");
     setNotificationButtonState("当前浏览器不支持");
     return;
   }
   if (Notification.permission === "denied") {
+    notificationBlockedReason = "permission_denied";
     notificationsEnabled = false;
     localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
     elements.notificationButton.classList.add("blocked");
@@ -421,6 +567,18 @@ function observeThreadNotificationStates(nextThreads, { prime = false } = {}) {
 async function toggleSystemNotifications() {
   if (!notificationSupportAvailable()) {
     renderNotificationState();
+    elements.notificationHelpMessage.textContent = "当前页面没有可用的安全通知环境。请确认使用 HTTPS，并使用支持系统通知的 Chrome。";
+    if (!elements.notificationHelpDialog.open) {
+      elements.notificationHelpDialog.showModal();
+    }
+    return;
+  }
+  if (Notification.permission === "denied") {
+    renderNotificationState();
+    elements.notificationHelpMessage.textContent = "浏览器已阻止这个本地网址的通知；网页不能自行重新弹出授权框。";
+    if (!elements.notificationHelpDialog.open) {
+      elements.notificationHelpDialog.showModal();
+    }
     return;
   }
   if (notificationsEnabled && Notification.permission === "granted") {
@@ -440,6 +598,7 @@ async function toggleSystemNotifications() {
   try {
     await registerNotificationWorker();
   } catch {
+    notificationBlockedReason = "service_worker_failed";
     elements.notificationButton.classList.add("blocked");
     setNotificationButtonState("通知服务注册失败，请刷新后重试");
     return;
@@ -1180,7 +1339,6 @@ function followLatestOrNotify(wasNearBottom) {
 function threadContentSignature(thread) {
   return JSON.stringify({
     activityStatus: thread.activityStatus,
-    updatedAt: thread.updatedAt,
     turns: (thread.turns || []).slice(-3).map((turn) => ({
       id: turn.id,
       status: turn.status,
@@ -1440,6 +1598,16 @@ function updateComposerState() {
   setComposerDisabled(inputDisabled);
 }
 
+function drawerThreadIsRunning(thread, liveThreadId) {
+  return Boolean(
+    thread.activityStatus === "inProgress"
+    || (
+      thread.id === liveThreadId
+      && (currentStopCandidates === 1 || desktopActivityIsRecent())
+    )
+  );
+}
+
 function createThreadButton(thread, liveThreadId, isRecent = false) {
   const button = document.createElement("button");
   button.type = "button";
@@ -1450,13 +1618,7 @@ function createThreadButton(thread, liveThreadId, isRecent = false) {
   title.className = "drawer-thread-title";
   title.textContent = thread.title;
   button.append(title);
-  const isRunning = (
-    thread.activityStatus === "inProgress"
-    || (
-      thread.id === liveThreadId
-      && (currentStopCandidates === 1 || desktopActivityIsRecent())
-    )
-  );
+  const isRunning = drawerThreadIsRunning(thread, liveThreadId);
   const isComplete = !isRunning && thread.activityStatus === "completed";
   if (isRunning || isComplete) {
     const state = document.createElement("span");
@@ -1890,8 +2052,46 @@ function renderProjectGroups() {
       path.title = String(group.path);
       body.append(path);
     }
-    for (const thread of group.threads) {
-      body.append(createSafeThreadButton(thread, liveThreadId));
+    const overflowRows = [];
+    const listExpanded = expandedProjectThreadLists.has(group.id);
+    for (let index = 0; index < group.threads.length; index += 1) {
+      const thread = group.threads[index];
+      const row = createSafeThreadButton(thread, liveThreadId);
+      const belongsInOverflow = Boolean(
+        index >= PROJECT_THREAD_PREVIEW_LIMIT
+        && thread.id !== selectedThread?.id
+        && !drawerThreadIsRunning(thread, liveThreadId)
+      );
+      if (belongsInOverflow) {
+        row.classList.add("project-thread-overflow");
+        row.hidden = !listExpanded;
+        overflowRows.push(row);
+      }
+      body.append(row);
+    }
+    if (overflowRows.length) {
+      const showMore = document.createElement("button");
+      showMore.type = "button";
+      showMore.className = "project-show-more";
+      const updateShowMore = (expanded) => {
+        showMore.textContent = expanded ? "Show less" : "Show more";
+        showMore.setAttribute("aria-expanded", String(expanded));
+        showMore.setAttribute(
+          "aria-label",
+          expanded
+            ? `收起 ${group.name} 的较早任务`
+            : `显示 ${group.name} 的另外 ${overflowRows.length} 个任务`,
+        );
+        for (const row of overflowRows) row.hidden = !expanded;
+      };
+      updateShowMore(listExpanded);
+      showMore.addEventListener("click", () => {
+        const expanded = !expandedProjectThreadLists.has(group.id);
+        if (expanded) expandedProjectThreadLists.add(group.id);
+        else expandedProjectThreadLists.delete(group.id);
+        updateShowMore(expanded);
+      });
+      body.append(showMore);
     }
     section.append(body);
   }
@@ -2586,25 +2786,104 @@ function appendHistoryItem(item, target = elements.threadHistory) {
 }
 
 function cachedThreadDetail(summary, turnLimit) {
-  const cached = threadHistoryCache.get(summary.id);
-  if (
-    !cached
-    || String(cached.updatedAt || "") !== String(summary.updatedAt || "")
-    || cached.turnLimit < turnLimit
-  ) return undefined;
+  let cached = threadHistoryCache.get(summary.id);
+  if (!cached) {
+    try {
+      const stored = JSON.parse(sessionStorage.getItem(THREAD_SESSION_CACHE_KEY) || "null");
+      if (
+        stored?.version === 1
+        && stored.threadId === summary.id
+        && stored.thread?.id === summary.id
+        && Array.isArray(stored.thread.turns)
+      ) {
+        cached = stored;
+        threadHistoryCache.set(summary.id, cached);
+      }
+    } catch {
+      // Storage can be unavailable in hardened/private browser modes.
+    }
+  }
+  if (!cached) return undefined;
   return cached;
 }
 
-function rememberThreadDetail(summary, thread, turnLimit) {
-  threadHistoryCache.set(summary.id, {
-    updatedAt: summary.updatedAt,
+function persistSessionThreadDetail(entry) {
+  const turns = Array.isArray(entry.thread?.turns) ? entry.thread.turns : [];
+  let retainedTurns = turns;
+  let complete = entry.complete !== false;
+  let serialized = "";
+  do {
+    const thread = {
+      ...entry.thread,
+      turns: retainedTurns,
+    };
+    if (retainedTurns.length !== turns.length) {
+      complete = false;
+      delete thread.historyCursor;
+    }
+    serialized = JSON.stringify({
+      version: 1,
+      ...entry,
+      complete,
+      turnLimit: complete
+        ? entry.turnLimit
+        : Math.min(entry.turnLimit, retainedTurns.length),
+      thread,
+    });
+    if (serialized.length <= THREAD_SESSION_CACHE_MAX_CHARS) break;
+    retainedTurns = retainedTurns.slice(1);
+  } while (retainedTurns.length);
+  try {
+    if (serialized && serialized.length <= THREAD_SESSION_CACHE_MAX_CHARS) {
+      sessionStorage.setItem(THREAD_SESSION_CACHE_KEY, serialized);
+    } else {
+      sessionStorage.removeItem(THREAD_SESSION_CACHE_KEY);
+    }
+  } catch {
+    // The in-memory cache still keeps the current page usable.
+  }
+}
+
+function rememberThreadDetail(summary, thread, turnLimit, complete = true) {
+  const entry = {
+    version: 1,
+    threadId: summary.id,
+    updatedAt: thread.updatedAt ?? summary.updatedAt,
     turnLimit,
     fetchedAt: Date.now(),
     thread,
-  });
+    complete,
+  };
+  threadHistoryCache.set(summary.id, entry);
+  persistSessionThreadDetail(entry);
   while (threadHistoryCache.size > 8) {
     threadHistoryCache.delete(threadHistoryCache.keys().next().value);
   }
+}
+
+function mergeIncrementalThreadDetail(cached, incoming) {
+  const delta = incoming?.historyDelta;
+  if (!delta) return { thread: incoming, complete: true };
+  if (!cached?.thread || cached.complete === false) return undefined;
+  const existingTurns = Array.isArray(cached.thread.turns)
+    ? cached.thread.turns
+    : [];
+  const baseIndex = existingTurns.findIndex(
+    (turn) => String(turn?.id || "") === String(delta.baseTurnId || ""),
+  );
+  if (baseIndex < 0) return undefined;
+  const incomingTurns = Array.isArray(incoming.turns) ? incoming.turns : [];
+  const mergedTurns = delta.mode === "append"
+    ? [...existingTurns.slice(0, baseIndex + 1), ...incomingTurns]
+    : [...existingTurns.slice(0, baseIndex), ...incomingTurns];
+  const historyLimit = Math.max(1, Number(incoming.historyLimit) || cached.turnLimit || 1);
+  const thread = {
+    ...cached.thread,
+    ...incoming,
+    turns: mergedTurns.slice(-historyLimit),
+  };
+  delete thread.historyDelta;
+  return { thread, complete: true };
 }
 
 function renderHistoryNotice(thread, turnLimit) {
@@ -2641,7 +2920,13 @@ function renderThreadDetail(thread, turnLimit, options = {}) {
     previousContentSignature
     && previousContentSignature !== nextContentSignature
   );
+  const shouldRebuildHistory = Boolean(
+    renderedThreadId !== thread.id
+    || !elements.threadHistory.childElementCount
+    || previousContentSignature !== nextContentSignature
+  );
   renderedThreadSignatures.set(thread.id, nextContentSignature);
+  renderedThreadId = thread.id;
   const summary = threads.find((candidate) => candidate.id === thread.id);
   const previousActivityStatus = summary?.activityStatus || "";
   if (summary) summary.activityStatus = String(thread.activityStatus || "");
@@ -2692,15 +2977,17 @@ function renderThreadDetail(thread, turnLimit, options = {}) {
     );
     if (terminalUpdateArrived) desktopActivityEvidence = undefined;
   }
-  const history = document.createDocumentFragment();
-  const visibleTurns = (thread.turns || []).slice(-turnLimit);
-  const firstVisibleIndex = Math.max(0, (thread.turns || []).length - visibleTurns.length);
-  for (let index = 0; index < visibleTurns.length; index += 1) {
-    const turn = visibleTurns[index];
-    const turnIdentity = turn.id || turn.startedAt || `turn-${firstVisibleIndex + index}`;
-    appendTurnHistory(turn, `${thread.id}:${turnIdentity}`, history);
+  if (shouldRebuildHistory) {
+    const history = document.createDocumentFragment();
+    const visibleTurns = (thread.turns || []).slice(-turnLimit);
+    const firstVisibleIndex = Math.max(0, (thread.turns || []).length - visibleTurns.length);
+    for (let index = 0; index < visibleTurns.length; index += 1) {
+      const turn = visibleTurns[index];
+      const turnIdentity = turn.id || turn.startedAt || `turn-${firstVisibleIndex + index}`;
+      appendTurnHistory(turn, `${thread.id}:${turnIdentity}`, history);
+    }
+    elements.threadHistory.replaceChildren(history);
   }
-  elements.threadHistory.replaceChildren(history);
   renderHistoryNotice(thread, turnLimit);
   if (summary && previousActivityStatus !== summary.activityStatus) {
     renderProjectGroups();
@@ -3408,10 +3695,15 @@ async function openThread(threadId, options = {}) {
   );
   const cached = cachedThreadDetail(summary, turnLimit);
   if (cached) {
-    renderThreadDetail(cached.thread, turnLimit, options);
+    renderThreadDetail(
+      cached.thread,
+      Math.min(turnLimit, Math.max(1, Number(cached.turnLimit) || turnLimit)),
+      options,
+    );
   } else {
     elements.threadMeta.textContent = "正在读取历史…";
     elements.threadHistory.replaceChildren();
+    renderedThreadId = "";
   }
   if (managedRun?.threadId !== threadId) {
     elements.managedLiveHistory.replaceChildren();
@@ -3423,7 +3715,17 @@ async function openThread(threadId, options = {}) {
   void refreshModelSettings(threadId);
   if (options.closeDrawer !== false) closeDrawer();
 
-  const cacheIsFresh = cached && Date.now() - cached.fetchedAt < THREAD_CACHE_TTL_MS;
+  const cacheMatchesRevision = Boolean(
+    cached
+    && String(cached.updatedAt || "") === String(summary.updatedAt || ""),
+  );
+  const cacheIsFresh = Boolean(
+    cached
+    && cached.complete !== false
+    && cached.turnLimit >= turnLimit
+    && cacheMatchesRevision
+    && Date.now() - cached.fetchedAt < THREAD_CACHE_TTL_MS,
+  );
   try {
     if (cacheIsFresh && !options.fresh) {
       if (options.refreshRun !== false) await refreshManagedRun(threadId);
@@ -3434,17 +3736,35 @@ async function openThread(threadId, options = {}) {
       revision: String(summary.updatedAt || ""),
     });
     if (options.fresh) query.set("fresh", "1");
-    const response = await fetch(
-      `/api/codex/threads/${encodeURIComponent(threadId)}?${query}`,
-      { headers: authorizationHeaders(), cache: "no-store" },
-    );
-    if (response.status === 401) {
-      handleUnauthorized();
-      return;
+    const cursor = cached?.complete !== false && cached?.thread?.historyCursor;
+    if (cursor?.turnId && cursor?.revision) {
+      query.set("tailTurnId", String(cursor.turnId));
+      query.set("tailRevision", String(cursor.revision));
     }
-    if (!response.ok) throw new Error("thread read failed");
-    const { thread } = await response.json();
-    rememberThreadDetail(summary, thread, turnLimit);
+    const fetchDetail = async () => {
+      const response = await fetch(
+        `/api/codex/threads/${encodeURIComponent(threadId)}?${query}`,
+        { headers: authorizationHeaders(), cache: "no-store" },
+      );
+      if (response.status === 401) {
+        handleUnauthorized();
+        return undefined;
+      }
+      if (!response.ok) throw new Error("thread read failed");
+      return (await response.json()).thread;
+    };
+    let incoming = await fetchDetail();
+    if (!incoming) return;
+    let merged = mergeIncrementalThreadDetail(cached, incoming);
+    if (!merged) {
+      query.delete("tailTurnId");
+      query.delete("tailRevision");
+      incoming = await fetchDetail();
+      if (!incoming) return;
+      merged = mergeIncrementalThreadDetail(undefined, incoming);
+    }
+    const { thread, complete } = merged;
+    rememberThreadDetail(summary, thread, turnLimit, complete);
     if (threadId !== selectedThread?.id) return;
     renderThreadDetail(thread, turnLimit, options);
     if (options.refreshRun !== false) await refreshManagedRun(threadId);
@@ -3772,6 +4092,15 @@ elements.newContentButton.addEventListener("click", () => scrollToLatest("smooth
 elements.refreshThreadsButton.addEventListener("click", loadThreads);
 elements.refreshUsageButton.addEventListener("click", () => refreshUsage(true));
 elements.notificationButton.addEventListener("click", toggleSystemNotifications);
+elements.notificationHelpClose.addEventListener("click", () => {
+  elements.notificationHelpDialog.close();
+});
+elements.localConnectionButton.addEventListener("click", openLocalConnectionDialog);
+elements.downloadLocalCaButton.addEventListener("click", downloadLocalCa);
+elements.localConnectionCancel.addEventListener("click", () => {
+  elements.localConnectionDialog.close();
+});
+elements.localConnectionSwitch.addEventListener("click", switchLocalConnection);
 elements.refreshConversationButton.addEventListener("click", refreshCurrentConversation);
 elements.modelSettingsButton.addEventListener("click", openModelSettingsDialog);
 elements.attachmentButton.addEventListener("click", () => {

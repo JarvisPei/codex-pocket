@@ -22,6 +22,7 @@ from mac_bridge import (
     desktop_message_landed,
     load_token,
     read_mac_battery,
+    read_local_hotspot_status,
     thread_user_message_fingerprints,
 )
 
@@ -86,6 +87,51 @@ class MacBatteryTest(unittest.TestCase):
         run.return_value.stdout = "Now drawing from 'AC Power'\n"
 
         self.assertEqual(read_mac_battery(), {"available": False})
+
+
+class LocalHotspotStatusTest(unittest.TestCase):
+    @patch("mac_bridge.subprocess.run")
+    def test_reports_constrained_hotspot_configuration_and_active_route(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stdout = "   gateway: 192.168.13.154\n interface: en0\n"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "local-hotspot.json"
+            ca = root / "local-ca.cer"
+            ca.write_bytes(b"certificate")
+            config.write_text(
+                json.dumps(
+                    {
+                        "enabled": True,
+                        "listenHost": "192.168.13.254",
+                        "port": 4318,
+                        "expectedGateway": "192.168.13.154",
+                        "expectedInterface": "en0",
+                        "url": "https://192.168.13.254:4318/",
+                        "caSha256": ":".join(["AA"] * 32),
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status = read_local_hotspot_status(config, ca)
+
+        self.assertTrue(status["configured"])
+        self.assertTrue(status["active"])
+        self.assertEqual(status["listenHost"], "192.168.13.254")
+
+    def test_rejects_malformed_or_incomplete_configuration(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = root / "local-hotspot.json"
+            config.write_text(
+                '{"enabled":true,"url":"https://example.com"}',
+                encoding="utf-8",
+            )
+            self.assertEqual(
+                read_local_hotspot_status(config, root / "missing.cer"),
+                {"configured": False, "active": False},
+            )
 
 
 class DesktopMessageConfirmationTest(unittest.TestCase):
@@ -967,6 +1013,9 @@ class BridgeApiTest(unittest.TestCase):
         self.assertIn("notificationButton", body)
         self.assertIn("macBattery", body)
         self.assertIn("connectionLatency", body)
+        self.assertIn("localConnectionButton", body)
+        self.assertIn("localConnectionDialog", body)
+        self.assertIn("notificationHelpDialog", body)
         self.assertIn("manifest.webmanifest", body)
         self.assertIn("default-src 'self'", response.getheader("Content-Security-Policy"))
         self.assertIn("worker-src 'self'", response.getheader("Content-Security-Policy"))
@@ -999,7 +1048,10 @@ class BridgeApiTest(unittest.TestCase):
         body = response.read()
         self.assertEqual(response.status, 200)
         self.assertEqual(response.getheader("Content-Encoding"), "gzip")
-        self.assertIn(b"openThread", gzip.decompress(body))
+        source = gzip.decompress(body)
+        self.assertIn(b"openThread", source)
+        self.assertIn(b"PROJECT_THREAD_PREVIEW_LIMIT", source)
+        self.assertIn(b"Show more", source)
 
     def test_attachment_upload_requires_a_paired_device(self):
         status, payload = self.raw_request(
@@ -1389,6 +1441,40 @@ class BridgeApiTest(unittest.TestCase):
         self.assertEqual(fresh_status, 200)
         self.assertEqual(self.app_server.read_count, 2)
 
+    def test_thread_history_refresh_returns_only_changed_tail(self):
+        path = "/api/codex/threads/thread-1?turns=30&revision=123&fresh=1"
+        first_status, first_payload = self.request("GET", path)
+        self.assertEqual(first_status, 200)
+        cursor = first_payload["thread"]["historyCursor"]
+        self.assertEqual(cursor["turnId"], "turn-1")
+        self.assertEqual(len(cursor["revision"]), 64)
+
+        self.app_server.last_turn_status = "inProgress"
+        changed_status, changed_payload = self.request(
+            "GET",
+            f"{path}&tailTurnId={cursor['turnId']}"
+            f"&tailRevision={cursor['revision']}",
+        )
+        self.assertEqual(changed_status, 200)
+        changed = changed_payload["thread"]
+        self.assertEqual(
+            changed["historyDelta"],
+            {"baseTurnId": "turn-1", "mode": "replace"},
+        )
+        self.assertEqual(len(changed["turns"]), 1)
+        self.assertEqual(changed["turns"][0]["status"], "inProgress")
+
+        next_cursor = changed["historyCursor"]
+        unchanged_status, unchanged_payload = self.request(
+            "GET",
+            f"{path}&tailTurnId={next_cursor['turnId']}"
+            f"&tailRevision={next_cursor['revision']}",
+        )
+        self.assertEqual(unchanged_status, 200)
+        unchanged = unchanged_payload["thread"]
+        self.assertEqual(unchanged["historyDelta"]["mode"], "append")
+        self.assertEqual(unchanged["turns"], [])
+
     def test_dispatches_turn_to_codex_desktop(self):
         status, payload = self.request(
             "POST",
@@ -1705,6 +1791,27 @@ class BridgeApiTest(unittest.TestCase):
         self.assertEqual(first_status, 201)
         self.assertEqual(second_status, 401)
         self.assertEqual(second_payload["error"], "invalid_or_expired_pairing")
+
+    def test_paired_device_can_create_single_use_handoff_ticket(self):
+        device = self.enroll_device()
+        status, payload = self.request(
+            "POST",
+            "/api/devices/handoff-ticket",
+            bearer=device["deviceToken"],
+        )
+        self.assertEqual(status, 201)
+
+        status, enrolled = self.request(
+            "POST",
+            "/api/devices/enroll",
+            {
+                "name": "Android local",
+                "pairingTicket": payload["pairingTicket"],
+            },
+            authorized=False,
+        )
+        self.assertEqual(status, 201)
+        self.assertIn("deviceToken", enrolled["device"])
 
     def test_master_control_is_disabled_after_device_migration(self):
         status, payload = self.request(

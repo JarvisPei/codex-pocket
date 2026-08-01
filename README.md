@@ -20,6 +20,7 @@ Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve
 - 五分钟单次配对二维码、每台设备独立凭据和设备撤销。
 - 长对话增量刷新、新内容提示和可拖动滚动条。
 - 可选 Android 系统通知：任务完成、暂停或需要确认时提醒，点击可回到对应任务。
+- 可选热点本地 HTTPS：手机同时为 Mac 提供热点时，绕过远端 DERP 中继直接访问。
 
 系统通知默认关闭，需要在手机抽屉中主动开启。通知只包含任务标题和状态，不包含回复正文。当前实现依赖 Codex Pocket 页面仍打开或保留在浏览器后台；彻底结束浏览器进程后不会继续轮询，也没有把通知内容交给第三方推送平台。
 
@@ -85,6 +86,29 @@ tailscale serve status
 
 随后使用 Tailscale 提供的 HTTPS 地址访问。
 
+## 手机热点本地直连（可选）
+
+当 Android 手机同时作为热点和控制端时，运营商 NAT 可能让 Tailscale 退回远端 DERP。保持手机与 Mac 都在该热点拓扑下，在 Mac 运行：
+
+```sh
+zsh scripts/install-local-hotspot-proxy.sh [port]
+```
+
+安装器会记录当前 Mac 热点 IP、手机网关和 Wi-Fi 接口，并创建独立的 TLS 反向代理：
+
+- 主 Bridge 仍只监听 `127.0.0.1:4317`；
+- 本地代理仅在记录的热点网关与接口同时匹配时监听 `https://<热点中的 Mac IP>:4318/`；
+- TLS 根证书带有 critical name constraints，只允许该热点 IP 与 `codex-pocket.local`；
+- 本地入口继续使用每台设备独立凭据，不暴露 Keychain 主凭据。
+
+安装后先通过原 Tailscale 页面打开抽屉，点击底部的 `⌁`：
+
+1. 下载 CA 证书，并在 Android 的“安装 CA 证书”设置中安装；
+2. 返回页面，再次点击 `⌁`，选择“切换到本地”；
+3. 页面会使用五分钟单次票据为本地 HTTPS origin 建立独立设备凭据。
+
+离开该热点后，本地代理会暂停监听；从本地页面可切回保存的 Tailscale origin。证书私钥只保存在 Mac 用户目录，权限为 `0600`。
+
 ## 配对手机
 
 在 Mac 上生成五分钟有效、只能使用一次的二维码：
@@ -107,6 +131,7 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 ## 安全边界
 
 - 仅允许绑定 `127.0.0.1`。
+- 可选热点代理是独立 TLS 进程；只反向代理到 loopback，并锁定预配置的 IP、网关、接口与 Host。
 - 不提供 CORS、通用 shell、任意 JSON-RPC 或原始 app-server 代理。
 - 每台手机拥有独立随机凭据；Mac 只保存其 SHA-256 摘要。
 - Keychain 主凭据不会发送到手机。

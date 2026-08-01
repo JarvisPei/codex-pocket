@@ -48,10 +48,81 @@ MAX_DEVICES = 32
 PAIRING_TICKET_TTL_SECONDS = 300
 THREAD_DETAIL_CACHE_TTL_SECONDS = 60
 THREAD_DETAIL_CACHE_MAX_ENTRIES = 24
+LOCAL_HOTSPOT_STATE_DIR = (
+    Path.home() / "Library" / "Application Support" / "MobileCodexBridge"
+)
+LOCAL_HOTSPOT_CONFIG_PATH = LOCAL_HOTSPOT_STATE_DIR / "local-hotspot.json"
+LOCAL_HOTSPOT_CA_PATH = LOCAL_HOTSPOT_STATE_DIR / "local-hotspot-tls" / "local-ca.cer"
 
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def thread_history_cursor(detail: dict[str, Any]) -> dict[str, str]:
+    """Return a stable cursor for the last sanitized turn sent to the phone."""
+    turns = detail.get("turns")
+    if not isinstance(turns, list) or not turns:
+        return {"turnId": "", "revision": ""}
+    tail = turns[-1]
+    if not isinstance(tail, dict):
+        return {"turnId": "", "revision": ""}
+    turn_id = str(tail.get("id", ""))[:128]
+    if not turn_id:
+        return {"turnId": "", "revision": ""}
+    canonical = json.dumps(
+        tail,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "turnId": turn_id,
+        "revision": hashlib.sha256(canonical).hexdigest(),
+    }
+
+
+def incremental_thread_detail(
+    detail: dict[str, Any],
+    base_turn_id: str,
+    base_revision: str,
+) -> dict[str, Any]:
+    """Return only the mutable tail when the client already has prior turns."""
+    result = dict(detail)
+    cursor = thread_history_cursor(detail)
+    result["historyCursor"] = cursor
+    turns = detail.get("turns")
+    if (
+        not base_turn_id
+        or not re.fullmatch(r"[0-9a-f]{64}", base_revision)
+        or not isinstance(turns, list)
+    ):
+        return result
+    base_index = next(
+        (
+            index
+            for index, turn in enumerate(turns)
+            if isinstance(turn, dict) and str(turn.get("id", "")) == base_turn_id
+        ),
+        None,
+    )
+    if base_index is None:
+        return result
+    base_cursor = thread_history_cursor({"turns": [turns[base_index]]})
+    base_unchanged = hmac.compare_digest(
+        base_cursor.get("revision", ""),
+        base_revision,
+    )
+    result["turns"] = (
+        turns[base_index + 1 :]
+        if base_unchanged
+        else turns[base_index:]
+    )
+    result["historyDelta"] = {
+        "baseTurnId": base_turn_id,
+        "mode": "append" if base_unchanged else "replace",
+    }
+    return result
 
 
 def same_text(left: str, right: str) -> bool:
@@ -91,6 +162,72 @@ def read_mac_battery() -> dict[str, Any]:
         "percent": percent,
         "state": state,
         "powerSource": power_source[:40],
+    }
+
+
+def read_local_hotspot_status(
+    config_path: Optional[Path] = None,
+    ca_path: Optional[Path] = None,
+) -> dict[str, Any]:
+    config_path = config_path or LOCAL_HOTSPOT_CONFIG_PATH
+    ca_path = ca_path or LOCAL_HOTSPOT_CA_PATH
+    unavailable = {"configured": False, "active": False}
+    try:
+        metadata = config_path.stat()
+        if not stat.S_ISREG(metadata.st_mode):
+            return unavailable
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return unavailable
+    if not isinstance(payload, dict) or payload.get("enabled") is not True:
+        return unavailable
+    listen_host = payload.get("listenHost")
+    expected_gateway = payload.get("expectedGateway")
+    expected_interface = payload.get("expectedInterface")
+    url = payload.get("url")
+    fingerprint = payload.get("caSha256")
+    port = payload.get("port")
+    if (
+        not isinstance(listen_host, str)
+        or not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", listen_host)
+        or not isinstance(expected_gateway, str)
+        or not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", expected_gateway)
+        or not isinstance(expected_interface, str)
+        or not re.fullmatch(r"[A-Za-z0-9._-]{1,32}", expected_interface)
+        or not isinstance(port, int)
+        or not 1 <= port <= 65535
+        or url != f"https://{listen_host}:{port}/"
+        or not isinstance(fingerprint, str)
+        or not re.fullmatch(r"(?:[0-9A-F]{2}:){31}[0-9A-F]{2}", fingerprint)
+        or not ca_path.is_file()
+    ):
+        return unavailable
+    active = False
+    try:
+        result = subprocess.run(
+            ["/sbin/route", "-n", "get", "default"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+        gateway_match = re.search(r"^\s*gateway:\s*(\S+)", result.stdout, re.MULTILINE)
+        interface_match = re.search(r"^\s*interface:\s*(\S+)", result.stdout, re.MULTILINE)
+        active = (
+            result.returncode == 0
+            and gateway_match is not None
+            and interface_match is not None
+            and gateway_match.group(1) == expected_gateway
+            and interface_match.group(1) == expected_interface
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        active = False
+    return {
+        "configured": True,
+        "active": active,
+        "url": url,
+        "listenHost": listen_host,
+        "caSha256": fingerprint,
     }
 
 
@@ -1168,6 +1305,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
         status: HTTPStatus,
         body: bytes,
         content_type: str,
+        extra_headers: Optional[dict[str, str]] = None,
     ) -> None:
         accepts_gzip = "gzip" in self.headers.get("Accept-Encoding", "").lower()
         compressible = (
@@ -1197,6 +1335,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
             "img-src 'self'; connect-src 'self'; worker-src 'self'; frame-ancestors 'none'; "
             "base-uri 'none'; form-action 'none'",
         )
+        for name, value in (extra_headers or {}).items():
+            self.send_header(name, value)
         self.end_headers()
         try:
             self.wfile.write(body)
@@ -1347,7 +1487,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             self._send_json(
                 HTTPStatus.OK,
-                {"ok": True, "battery": read_mac_battery()},
+                {
+                    "ok": True,
+                    "battery": read_mac_battery(),
+                    "localHotspot": read_local_hotspot_status(),
+                },
+            )
+            return
+        if path == "/api/local-hotspot/ca":
+            if not self._require_control_auth():
+                return
+            status = read_local_hotspot_status()
+            if not status.get("configured"):
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "hotspot_not_configured"})
+                return
+            try:
+                body = LOCAL_HOTSPOT_CA_PATH.read_bytes()
+            except OSError:
+                self._send_json(HTTPStatus.NOT_FOUND, {"error": "hotspot_ca_unavailable"})
+                return
+            self._send_bytes(
+                HTTPStatus.OK,
+                body,
+                "application/x-x509-ca-cert",
+                {"Content-Disposition": 'attachment; filename="codex-pocket-local-ca.cer"'},
             )
             return
         if path == "/api/codex/models":
@@ -1483,6 +1646,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             revision = str(query.get("revision", [""])[0])[:128]
             force_fresh = query.get("fresh", ["0"])[0] == "1"
+            tail_turn_id = str(query.get("tailTurnId", [""])[0])[:128]
+            tail_revision = str(query.get("tailRevision", [""])[0])[:64].lower()
             detail = None if force_fresh else self.server.cached_thread_detail(
                 thread_id,
                 revision,
@@ -1511,11 +1676,16 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     turn_limit,
                     detail,
                 )
+            response_detail = incremental_thread_detail(
+                detail,
+                tail_turn_id,
+                tail_revision,
+            )
             self._send_json(
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "thread": detail,
+                    "thread": response_detail,
                 },
             )
             return
@@ -1609,6 +1779,19 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             payload = self._read_json()
             if payload is None:
+                return
+            ticket = self.server.pairing_tickets.create()
+            self._send_json(
+                HTTPStatus.CREATED,
+                {
+                    "ok": True,
+                    "pairingTicket": ticket,
+                    "expiresIn": self.server.pairing_tickets.ttl_seconds,
+                },
+            )
+            return
+        if self.path == "/api/devices/handoff-ticket":
+            if not self._require_control_auth():
                 return
             ticket = self.server.pairing_tickets.create()
             self._send_json(

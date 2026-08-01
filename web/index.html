@@ -49,10 +49,15 @@
             <span id="connectionLatency" class="connection-latency">延迟 --</span>
           </small>
         </span>
-        <button id="notificationButton" class="notification-toggle" type="button" aria-label="系统通知" title="系统通知">
-          <span class="notification-bell" aria-hidden="true"></span>
-          <span id="notificationStatus" class="visually-hidden">正在检查浏览器支持…</span>
-        </button>
+        <span class="drawer-footer-actions">
+          <button id="notificationButton" class="notification-toggle" type="button" aria-label="系统通知" title="系统通知">
+            <span class="notification-bell" aria-hidden="true"></span>
+            <span id="notificationStatus" class="visually-hidden">正在检查浏览器支持…</span>
+          </button>
+          <button id="localConnectionButton" class="local-connection-toggle" type="button" aria-label="热点本地直连" title="热点本地直连" hidden>
+            <span aria-hidden="true">⌁</span>
+          </button>
+        </span>
         <button id="tokenButton" class="plain-icon" type="button" aria-label="查看设备配对">•••</button>
       </div>
     </aside>
@@ -190,6 +195,46 @@
         <div class="dialog-actions">
           <button id="tokenCancel" class="secondary-button" type="button">取消</button>
           <button class="primary-button" type="submit">连接</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="localConnectionDialog">
+      <form method="dialog">
+        <p class="dialog-eyebrow">LOCAL HOTSPOT</p>
+        <h2>热点本地直连</h2>
+        <p id="localConnectionDescription">同一手机热点下可绕过远程中继，直接连接 Mac。</p>
+        <ol id="localConnectionSteps" class="local-connection-steps">
+          <li>先下载并在 Android 系统中安装一次受限 CA 证书。</li>
+          <li>返回这里，点击“切换到本地”。</li>
+        </ol>
+        <details id="localCertificateDetails" class="local-certificate-details">
+          <summary>证书详情</summary>
+          <p class="local-ca-fingerprint">CA SHA-256：<code id="localCaFingerprint">--</code></p>
+        </details>
+        <p id="localConnectionError" class="form-error" aria-live="polite"></p>
+        <div class="local-connection-download">
+          <button id="downloadLocalCaButton" class="secondary-button" type="button">下载 CA 证书</button>
+        </div>
+        <div class="dialog-actions">
+          <button id="localConnectionCancel" class="secondary-button" type="button">取消</button>
+          <button id="localConnectionSwitch" class="primary-button" type="button">切换到本地</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="notificationHelpDialog">
+      <form method="dialog">
+        <p class="dialog-eyebrow">NOTIFICATIONS</p>
+        <h2>通知权限被阻止</h2>
+        <p id="notificationHelpMessage">浏览器已阻止这个网址的通知，网页不能自行重新弹出授权框。</p>
+        <ol class="local-connection-steps">
+          <li>点击浏览器地址栏附近的网站设置图标。</li>
+          <li>打开“权限”或“通知”，改为“允许”。</li>
+          <li>返回并刷新 Codex Pocket，再点击通知按钮。</li>
+        </ol>
+        <div class="dialog-actions single-action">
+          <button id="notificationHelpClose" class="primary-button" type="button">知道了</button>
         </div>
       </form>
     </dialog>
