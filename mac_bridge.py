@@ -783,6 +783,62 @@ class DesktopController:
                 detail = result.stderr.strip() or "Accessibility interrupt failed"
                 raise RuntimeError(detail)
 
+    def interrupt_thread(self, thread_id: str, expected_task_title: str) -> None:
+        """Navigate Desktop to a thread, verify its identity, then press Stop."""
+        thread_url = f"codex://threads/{urllib.parse.quote(thread_id, safe='')}"
+        with self._interrupt_lock:
+            navigation = subprocess.run(
+                ["/usr/bin/open", "-b", "com.openai.codex", thread_url],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if navigation.returncode != 0:
+                detail = navigation.stderr.strip() or "Unable to open Codex task"
+                raise ThreadNavigationError(detail)
+
+            navigation_deadline = time.monotonic() + 8
+            actual_task_title = ""
+            while time.monotonic() < navigation_deadline:
+                try:
+                    actual_task_title = self.current_task_title()
+                except (RuntimeError, TaskIdentityError):
+                    actual_task_title = ""
+                if same_text(actual_task_title, expected_task_title):
+                    break
+                time.sleep(0.2)
+            else:
+                raise ThreadNavigationError(
+                    "Codex Desktop did not navigate to the requested task"
+                )
+
+            stop_deadline = time.monotonic() + 4
+            count = 0
+            while time.monotonic() < stop_deadline:
+                first_title = self.current_task_title()
+                if not same_text(first_title, expected_task_title):
+                    raise TaskChangedError(first_title)
+                count = self.stop_candidate_count()
+                second_title = self.current_task_title()
+                if not same_text(second_title, expected_task_title):
+                    raise TaskChangedError(second_title)
+                if count == 1:
+                    break
+                if count > 1:
+                    raise StopCandidateError(count)
+                time.sleep(0.2)
+            if count != 1:
+                raise StopCandidateError(count)
+
+            result = self._run(
+                "--stop",
+                f"--expected-task-title={expected_task_title}",
+            )
+            if result.returncode != 0:
+                detail = result.stderr.strip() or "Accessibility interrupt failed"
+                raise RuntimeError(detail)
+
     def send_to_desktop(
         self,
         thread_id: str,
@@ -933,6 +989,10 @@ class TaskChangedError(RuntimeError):
     def __init__(self, actual_title: str) -> None:
         self.actual_title = actual_title
         super().__init__("foreground task changed")
+
+
+class ThreadNavigationError(RuntimeError):
+    pass
 
 
 class BridgeServer(ThreadingHTTPServer):
@@ -2078,8 +2138,24 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if not isinstance(expected_task_title, str) or not expected_task_title.strip():
             self._send_json(HTTPStatus.BAD_REQUEST, {"error": "task_identity_required"})
             return
+        thread_id = payload.get("threadId")
+        if (
+            not isinstance(thread_id, str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{5,255}", thread_id)
+        ):
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "thread_identity_required"})
+            return
         try:
-            self.server.controller.interrupt(expected_task_title.strip())
+            self.server.controller.interrupt_thread(
+                thread_id,
+                expected_task_title.strip(),
+            )
+        except ThreadNavigationError:
+            self._send_json(
+                HTTPStatus.CONFLICT,
+                {"ok": False, "error": "thread_navigation_failed"},
+            )
+            return
         except TaskChangedError:
             self._send_json(
                 HTTPStatus.CONFLICT,

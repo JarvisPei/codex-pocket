@@ -278,6 +278,7 @@ class FakeController:
         self.count = count
         self.task_title = task_title
         self.interrupted = False
+        self.interrupted_thread = None
         self.fail_status = False
         self.desktop_sent = []
         self.desktop_attachments = []
@@ -318,6 +319,14 @@ class FakeController:
         if self.count != 1:
             raise StopCandidateError(self.count)
         self.interrupted = True
+
+    def interrupt_thread(self, thread_id, expected_task_title):
+        if expected_task_title != self.task_title:
+            raise TaskChangedError(self.task_title)
+        if self.count != 1:
+            raise StopCandidateError(self.count)
+        self.interrupted = True
+        self.interrupted_thread = thread_id
 
     def send_to_desktop(
         self,
@@ -1521,22 +1530,41 @@ class BridgeApiTest(unittest.TestCase):
         self.assertEqual(payload["error"], "task_identity_required")
         self.assertFalse(self.controller.interrupted)
 
-    def test_interrupt_presses_only_unique_stop_button(self):
+    def test_interrupt_requires_thread_identity(self):
         status, payload = self.request(
             "POST",
             "/api/desktop/interrupt",
             {"confirm": True, "expectedTaskTitle": "继续项目开发"},
         )
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"], "thread_identity_required")
+        self.assertFalse(self.controller.interrupted)
+
+    def test_interrupt_presses_only_unique_stop_button(self):
+        status, payload = self.request(
+            "POST",
+            "/api/desktop/interrupt",
+            {
+                "confirm": True,
+                "threadId": "thread-1",
+                "expectedTaskTitle": "继续项目开发",
+            },
+        )
         self.assertEqual(status, 200)
         self.assertTrue(payload["interrupted"])
         self.assertTrue(self.controller.interrupted)
+        self.assertEqual(self.controller.interrupted_thread, "thread-1")
 
     def test_interrupt_refuses_ambiguous_state(self):
         self.controller.count = 2
         status, payload = self.request(
             "POST",
             "/api/desktop/interrupt",
-            {"confirm": True, "expectedTaskTitle": "继续项目开发"},
+            {
+                "confirm": True,
+                "threadId": "thread-1",
+                "expectedTaskTitle": "继续项目开发",
+            },
         )
         self.assertEqual(status, 409)
         self.assertEqual(payload["stopCandidates"], 2)
@@ -1546,7 +1574,11 @@ class BridgeApiTest(unittest.TestCase):
         status, payload = self.request(
             "POST",
             "/api/desktop/interrupt",
-            {"confirm": True, "expectedTaskTitle": "另一个任务"},
+            {
+                "confirm": True,
+                "threadId": "thread-1",
+                "expectedTaskTitle": "另一个任务",
+            },
         )
         self.assertEqual(status, 409)
         self.assertEqual(payload["error"], "foreground_task_changed")
@@ -1955,6 +1987,48 @@ class DesktopControllerCommandTest(unittest.TestCase):
             run.call_args.args[0],
             ["/usr/bin/swift", "/repo/scripts/codex-ax.swift", "--check-stop"],
         )
+
+    @patch("mac_bridge.subprocess.run")
+    def test_interrupt_thread_navigates_by_id_before_stopping(self, run):
+        opened = type(
+            "Result", (), {"returncode": 0, "stdout": "", "stderr": ""}
+        )()
+        title = type(
+            "Result",
+            (),
+            {
+                "returncode": 0,
+                "stdout": '{"taskTitles":["继续项目开发"]}',
+                "stderr": "",
+            },
+        )()
+        stop = type(
+            "Result",
+            (),
+            {"returncode": 0, "stdout": '{"stopCandidates":1}', "stderr": ""},
+        )()
+        pressed = type(
+            "Result", (), {"returncode": 0, "stdout": "stopped", "stderr": ""}
+        )()
+        run.side_effect = [opened, title, title, stop, title, pressed]
+        controller = DesktopController(
+            Path("/repo/scripts/codex-ax.swift"),
+            ax_helper=Path("/Applications/MobileCodexBridgeHelper/mobile-codex-ax"),
+        )
+
+        controller.interrupt_thread("thread-1", "继续项目开发")
+
+        commands = [call.args[0] for call in run.call_args_list]
+        self.assertEqual(
+            commands[0],
+            [
+                "/usr/bin/open",
+                "-b",
+                "com.openai.codex",
+                "codex://threads/thread-1",
+            ],
+        )
+        self.assertEqual(commands[-1][-2:], ["--stop", "--expected-task-title=继续项目开发"])
 
     @patch("mac_bridge.subprocess.run")
     def test_foreground_status_activates_and_rechecks_task_identity(self, run):

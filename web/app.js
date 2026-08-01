@@ -1079,16 +1079,14 @@ function updateComposerState() {
     || (isDesktopThread && currentStopCandidates === 1)
   ) {
     modeText = "Desktop · 运行中";
-    if (isDesktopThread && currentStopCandidates === 1) {
-      stateText = "Mac 任务运行中 · 点红色按钮可停止";
-      actionIsStop = true;
-      actionDisabled = false;
-    } else if (selectedThreadLastTurnStatus === "waitingForInput") {
-      stateText = "任务运行中 · 正在等待你的确认";
-    } else if (selectedThreadLastTurnStatus === "interrupting") {
+    if (selectedThreadLastTurnStatus === "interrupting") {
       stateText = "正在停止 Desktop 任务…";
     } else {
-      stateText = "Mac 任务运行中 · 正在同步可停止状态";
+      stateText = isDesktopThread && currentStopCandidates === 1
+        ? "Mac 任务运行中 · 点红色按钮可停止"
+        : "任务正在 Mac 上运行 · 点红色按钮可切换并停止";
+      actionIsStop = true;
+      actionDisabled = false;
     }
   } else if (isPaused) {
     stateText = "任务已暂停 · 留空可继续，也可输入新指令";
@@ -3384,8 +3382,9 @@ async function refreshDesktopConversationIfRunning() {
 }
 
 async function interruptCurrentTask() {
-  if (!currentTaskTitle || selectedThread?.id !== uniqueCurrentThreadId()) return;
+  if (!selectedThread?.id || !selectedThread.title) return;
   const threadId = selectedThread.id;
+  const expectedTaskTitle = selectedThread.title;
   elements.confirmButton.disabled = true;
   elements.confirmButton.textContent = "正在核对…";
   try {
@@ -3397,12 +3396,14 @@ async function interruptCurrentTask() {
       },
       body: JSON.stringify({
         confirm: true,
-        expectedTaskTitle: currentTaskTitle,
+        threadId,
+        expectedTaskTitle,
       }),
     });
     const result = await response.json();
     if (response.ok && result.interrupted) {
       elements.stopDialog.close();
+      currentTaskTitle = expectedTaskTitle;
       currentStopCandidates = 0;
       desktopDispatchState = undefined;
       selectedThreadLastTurnStatus = "interrupting";
@@ -3426,8 +3427,23 @@ async function interruptCurrentTask() {
     }
     if (result.error === "foreground_task_changed") {
       elements.stopDialog.close();
-      elements.composerState.textContent = "Desktop 前台任务已切换，已拒绝停止";
+      elements.composerState.textContent = "任务切换后标识发生变化，已拒绝停止";
       await refreshStatus();
+      return;
+    }
+    if (result.error === "thread_navigation_failed") {
+      elements.stopDialog.close();
+      elements.composerState.textContent = "Mac 没有成功切换到该任务，未执行停止";
+      await refreshStatus();
+      return;
+    }
+    if (result.error === "active_stop_button_not_unique") {
+      elements.stopDialog.close();
+      elements.composerState.textContent = Number(result.stopCandidates) === 0
+        ? "任务可能刚刚结束，未找到停止按钮"
+        : "检测到多个停止按钮，为安全起见未执行";
+      await refreshStatus();
+      await openThread(threadId, { fresh: true, scroll: false });
       return;
     }
     throw new Error("interrupt refused");
@@ -3493,7 +3509,7 @@ elements.composerActionButton.addEventListener("click", () => {
       interruptManagedTurn();
       return;
     }
-    elements.confirmTaskTitle.textContent = currentTaskTitle;
+    elements.confirmTaskTitle.textContent = selectedThread?.title || "当前任务";
     elements.composerState.textContent = "请在弹窗中确认停止 Desktop 任务";
     elements.stopDialog.showModal();
     return;

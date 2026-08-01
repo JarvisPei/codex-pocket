@@ -184,19 +184,20 @@ curl \
   -X POST \
   -H "Authorization: Bearer $MOBILE_CODEX_BRIDGE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"confirm":true,"expectedTaskTitle":"继续项目开发"}' \
+  -d '{"confirm":true,"threadId":"019fb6fd-68d6-71f1-8d60-ea75a658d0ab","expectedTaskTitle":"继续项目开发"}' \
   http://127.0.0.1:4317/api/desktop/interrupt
 ```
 
-The bridge refuses the request unless it finds exactly one enabled AX button
-whose semantic description is `Stop` in the composer region. This action
-targets the task currently visible in the ChatGPT/Codex window.
+The bridge first opens `codex://threads/<threadId>`, then refuses the request
+unless the focused Desktop window exposes the exact expected task title and
+exactly one enabled AX button whose semantic description is `Stop` in the
+composer region.
 
-The status endpoint reads the foreground task title from the Desktop header.
-The interrupt request must echo that exact title. Immediately before pressing,
-the bridge brings ChatGPT forward, reads the title again, and refuses if it
-changed. Bringing the app forward only happens for a confirmed interrupt;
-background status polling never steals focus.
+The interrupt request must include the selected task's id and exact title.
+Immediately before pressing, the bridge reads the focused window title on both
+sides of the Stop probe and refuses if it changed. Switching and bringing the
+app forward only happen for a confirmed interrupt; background status polling
+never steals focus.
 
 When ChatGPT is covered by another app, AX coordinate hit-testing can report
 zero Stop candidates. The mobile page still permits a guarded attempt because

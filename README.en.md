@@ -13,7 +13,7 @@ Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own ta
 - Read recent messages, final answers, and position-preserving `Working` / `Worked` activity summaries.
 - Send follow-up instructions to existing Desktop tasks.
 - Attach files or images from mobile, up to four files and 20 MB per file.
-- Distinguish running, paused, and completed tasks and safely stop the active Desktop turn.
+- Distinguish running, paused, and completed tasks and safely stop any running Desktop turn after an ID-based task switch.
 - Change the task model, reasoning effort, and Fast service tier.
 - Display remaining usage.
 - Handle one-shot command/file approvals and structured user questions.
@@ -104,7 +104,7 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 - The Keychain master credential never leaves the Mac.
 - Desktop send verifies the exact thread id, task title, empty composer, and unique Send control.
 - Attachments are isolated per paired device, stored in a mode-`0700` upload directory, expire after one hour, and are rejected by the Helper if their path leaves that directory.
-- Stop requires explicit confirmation and a unique semantic Stop control.
+- Stop requires explicit confirmation, an ID-based Desktop task switch, an exact title check, and a unique semantic Stop control.
 - Logs contain metadata only, not Authorization values or full prompt bodies.
 - Markdown is rendered without `innerHTML`; external links are restricted.
 

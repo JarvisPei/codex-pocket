@@ -153,9 +153,15 @@ func sizeAttribute(_ element: AXUIElement, _ name: CFString) -> CGSize? {
     return size
 }
 
+func activeWindows() -> [AXUIElement] {
+    if let focused = attribute(root, kAXFocusedWindowAttribute as CFString) {
+        return [focused as! AXUIElement]
+    }
+    return attribute(root, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+}
+
 func scanBottomOfWindows(performStop: Bool, checkStop: Bool) {
-    let windows =
-        attribute(root, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+    let windows = activeWindows()
     var hitElements = Set<CFHashCode>()
     var stopCandidates: [AXUIElement] = []
 
@@ -286,8 +292,7 @@ func inspectWindowHeaders() {
 }
 
 func currentTaskTitles() -> [String] {
-    let windows =
-        attribute(root, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+    let windows = activeWindows()
     var hitElements = Set<CFHashCode>()
     var titles: [String] = []
 
