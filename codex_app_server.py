@@ -1190,6 +1190,11 @@ def summarize_thread_detail(
                 for item in items[:200]:
                     safe_item = _safe_item(item)
                     if safe_item is not None:
+                        if (
+                            safe_item.get("type") == "userMessage"
+                            and turn.get("startedAt") is not None
+                        ):
+                            safe_item["timestamp"] = turn.get("startedAt")
                         safe_items.append(safe_item)
             activity_items = [
                 {
@@ -1233,6 +1238,8 @@ def summarize_thread_detail(
                 for safe_item in reversed(safe_items):
                     if safe_item.get("type") == "agentMessage":
                         safe_item["phase"] = "final_answer"
+                        if turn.get("completedAt") is not None:
+                            safe_item["timestamp"] = turn.get("completedAt")
                         break
             safe_turns.append(
                 {

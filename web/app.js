@@ -2238,6 +2238,42 @@ function appendHistoryItem(item, target = elements.threadHistory) {
     text.classList.add("plain-text");
     text.textContent = item.label || item.status || "";
   }
+  if (
+    item.timestamp
+    && (
+      item.type === "userMessage"
+      || (item.type === "agentMessage" && item.phase === "final_answer")
+    )
+  ) {
+    const milliseconds = timestampMilliseconds(item.timestamp);
+    if (Number.isFinite(milliseconds)) {
+      const date = new Date(milliseconds);
+      const now = new Date();
+      const sameDay = (
+        date.getFullYear() === now.getFullYear()
+        && date.getMonth() === now.getMonth()
+        && date.getDate() === now.getDate()
+      );
+      const timestamp = document.createElement("time");
+      timestamp.className = "history-timestamp";
+      timestamp.dateTime = date.toISOString();
+      timestamp.textContent = new Intl.DateTimeFormat("zh-CN", {
+        ...(sameDay
+          ? {}
+          : {
+            ...(date.getFullYear() === now.getFullYear()
+              ? {}
+              : { year: "numeric" }),
+            month: "numeric",
+            day: "numeric",
+          }),
+        hour: "2-digit",
+        minute: "2-digit",
+        hourCycle: "h23",
+      }).format(date);
+      label.append(timestamp);
+    }
+  }
   card.append(label);
   if (item.type === "userMessage" && Array.isArray(item.attachments)) {
     const attachments = document.createElement("div");
@@ -3546,7 +3582,23 @@ window.addEventListener("resize", () => {
   updateLatestButton();
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") refreshStatus();
+  if (document.visibilityState !== "visible") return;
+  refreshStatus();
+  if (selectedThread && !desktopHistoryRefreshInFlight) {
+    desktopHistoryRefreshInFlight = true;
+    openThread(selectedThread.id, {
+      fresh: true,
+      scroll: false,
+      refreshRun: false,
+      rerenderProjects: false,
+      closeDrawer: false,
+    }).finally(() => {
+      desktopHistoryRefreshInFlight = false;
+    });
+  }
+  if (elements.projectDrawer.classList.contains("open")) {
+    refreshDrawerThreadStates();
+  }
 });
 window.visualViewport?.addEventListener("resize", () => {
   resizeComposer();

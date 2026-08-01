@@ -648,6 +648,7 @@ class StoredActivitySummaryTest(unittest.TestCase):
                     {
                         "id": "live-order",
                         "status": "inProgress",
+                        "startedAt": 123,
                         "items": [
                             {
                                 "id": "user",
@@ -670,6 +671,7 @@ class StoredActivitySummaryTest(unittest.TestCase):
                 live_turn["items"][1]["activityKind"],
                 "working",
             )
+            self.assertEqual(live_turn["items"][0]["timestamp"], 123)
 
     def test_includes_desktop_activity_categories_without_command_text(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -711,6 +713,8 @@ class StoredActivitySummaryTest(unittest.TestCase):
                     {
                         "id": "activity",
                         "status": "completed",
+                        "startedAt": 100,
+                        "completedAt": 200,
                         "items": [
                             {"id": "compact", "type": "contextCompaction"},
                             {
@@ -739,6 +743,9 @@ class StoredActivitySummaryTest(unittest.TestCase):
             browser = next(item for item in items if item.get("id") == "browser")
             self.assertEqual(browser["activityKind"], "browser")
             self.assertEqual(browser["label"], "检查页面")
+            answer = next(item for item in items if item.get("id") == "answer")
+            self.assertEqual(answer["phase"], "final_answer")
+            self.assertEqual(answer["timestamp"], 200)
             self.assertNotIn("rg -n TODO", json.dumps(detail))
 
             with path.open("a", encoding="utf-8") as handle:
