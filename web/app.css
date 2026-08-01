@@ -1024,10 +1024,10 @@ body.composer-focused .composer-state { visibility: hidden; }
   background: #fffdf7;
 }
 .usage-card {
-  margin: 10px 4px 4px;
-  padding: 11px 12px 12px;
+  margin: 7px 4px 3px;
+  padding: 8px 10px 9px;
   border: 1px solid #dedfdf;
-  border-radius: 13px;
+  border-radius: 12px;
   background: rgba(255, 255, 255, 0.72);
 }
 .usage-heading {
@@ -1040,15 +1040,15 @@ body.composer-focused .composer-state { visibility: hidden; }
 .usage-heading span { margin-right: auto; }
 .usage-heading button { font-size: 17px; }
 .usage-heading button.refreshing { animation: refresh-spin 800ms linear infinite; }
-.usage-content { margin-top: 9px; display: grid; gap: 10px; }
+.usage-content { margin-top: 6px; display: grid; gap: 7px; }
 .usage-placeholder { color: #999995; font-size: 11px; }
-.usage-limit { display: grid; gap: 5px; }
+.usage-limit { display: grid; gap: 3px; }
 .usage-limit-line {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  gap: 8px;
+  gap: 6px;
   color: #52524e;
-  font-size: 11px;
+  font-size: 10px;
 }
 .usage-limit-line strong {
   overflow: hidden;
@@ -1057,7 +1057,7 @@ body.composer-focused .composer-state { visibility: hidden; }
 }
 .usage-limit-line span { color: #383835; font-weight: 740; }
 .usage-bar {
-  height: 5px;
+  height: 4px;
   overflow: hidden;
   border-radius: 999px;
   background: #e3e3e0;
@@ -1068,39 +1068,62 @@ body.composer-focused .composer-state { visibility: hidden; }
   border-radius: inherit;
   background: #45a873;
 }
-.usage-reset { color: #969691; font-size: 9px; }
-.notification-card {
-  width: calc(100% - 8px);
-  min-height: 54px;
-  margin: 6px 4px 8px;
-  padding: 9px 11px;
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 16px;
-  align-items: center;
-  gap: 9px;
-  border: 1px solid #dedfdf;
-  border-radius: 13px;
-  color: #52524e;
-  background: rgba(255, 255, 255, 0.72);
-  text-align: left;
-}
-.notification-card:active { background: #ededeb; }
-.notification-card.enabled .notification-icon { color: var(--green); }
-.notification-card.blocked .notification-icon { color: var(--danger); }
-.notification-icon { color: #aaa9a5; font-size: 13px; }
-.notification-copy { min-width: 0; }
-.notification-copy strong,
-.notification-copy small { display: block; }
-.notification-copy strong { font-size: 11px; font-weight: 760; }
-.notification-copy small {
-  margin-top: 3px;
+.usage-reset { color: #969691; font-size: 8.5px; }
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
   overflow: hidden;
-  color: #969691;
-  font-size: 9px;
-  text-overflow: ellipsis;
+  clip: rect(0, 0, 0, 0);
   white-space: nowrap;
+  border: 0;
 }
-.notification-chevron { color: #aaa9a5; font-size: 20px; }
+.notification-toggle {
+  width: 32px;
+  height: 32px;
+  margin-left: auto;
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #969691;
+  background: transparent;
+}
+.notification-toggle:active { background: #e9e9e7; }
+.notification-toggle.enabled { color: var(--green); }
+.notification-toggle.blocked { color: var(--danger); }
+.notification-bell {
+  position: relative;
+  width: 13px;
+  height: 14px;
+  display: block;
+  border: 1.8px solid currentColor;
+  border-radius: 7px 7px 4px 4px;
+}
+.notification-bell::before {
+  position: absolute;
+  top: -4px;
+  left: 50%;
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  content: "";
+  transform: translateX(-50%);
+}
+.notification-bell::after {
+  position: absolute;
+  bottom: -5px;
+  left: 50%;
+  width: 5px;
+  height: 2px;
+  border-radius: 0 0 5px 5px;
+  background: currentColor;
+  content: "";
+  transform: translateX(-50%);
+}
 .drawer-footer {
   min-height: 46px;
   padding: 8px 9px 0;
@@ -1111,7 +1134,13 @@ body.composer-focused .composer-state { visibility: hidden; }
   color: var(--muted);
   font-size: 11px;
 }
-.drawer-footer #tokenButton { margin-left: auto; }
+.drawer-footer #deviceStatus {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.drawer-footer #tokenButton { margin-left: 0; }
 
 dialog {
   width: min(calc(100% - 30px), 430px);

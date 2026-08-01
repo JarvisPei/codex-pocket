@@ -193,18 +193,24 @@ function registerNotificationWorker() {
   return serviceWorkerRegistrationPromise;
 }
 
+function setNotificationButtonState(label) {
+  elements.notificationStatus.textContent = label;
+  elements.notificationButton.title = label;
+  elements.notificationButton.setAttribute("aria-label", `系统通知：${label}`);
+}
+
 function renderNotificationState() {
   elements.notificationButton.classList.remove("enabled", "blocked");
   if (!notificationSupportAvailable()) {
     elements.notificationButton.classList.add("blocked");
-    elements.notificationStatus.textContent = "当前浏览器不支持";
+    setNotificationButtonState("当前浏览器不支持");
     return;
   }
   if (Notification.permission === "denied") {
     notificationsEnabled = false;
     localStorage.removeItem(NOTIFICATIONS_ENABLED_KEY);
     elements.notificationButton.classList.add("blocked");
-    elements.notificationStatus.textContent = "已被浏览器阻止，请在网站设置中允许";
+    setNotificationButtonState("已被浏览器阻止，请在网站设置中允许");
     return;
   }
   if (notificationsEnabled && Notification.permission !== "granted") {
@@ -213,12 +219,12 @@ function renderNotificationState() {
   }
   if (notificationsEnabled && Notification.permission === "granted") {
     elements.notificationButton.classList.add("enabled");
-    elements.notificationStatus.textContent = "已开启 · 页面留在后台即可提醒";
+    setNotificationButtonState("已开启 · 页面留在后台即可提醒");
     return;
   }
-  elements.notificationStatus.textContent = Notification.permission === "granted"
+  setNotificationButtonState(Notification.permission === "granted"
     ? "已关闭 · 点此开启"
-    : "点此开启";
+    : "点此开启");
 }
 
 async function showSystemNotification(title, options = {}) {
@@ -324,7 +330,7 @@ async function toggleSystemNotifications() {
     await registerNotificationWorker();
   } catch {
     elements.notificationButton.classList.add("blocked");
-    elements.notificationStatus.textContent = "通知服务注册失败，请刷新后重试";
+    setNotificationButtonState("通知服务注册失败，请刷新后重试");
     return;
   }
   notificationsEnabled = true;
@@ -3765,7 +3771,7 @@ renderNotificationState();
 registerNotificationWorker().catch(() => {
   if (notificationsEnabled) {
     elements.notificationButton.classList.add("blocked");
-    elements.notificationStatus.textContent = "通知服务注册失败，请刷新后重试";
+    setNotificationButtonState("通知服务注册失败，请刷新后重试");
   }
 });
 Promise.all([refreshStatus(), loadThreads()]);

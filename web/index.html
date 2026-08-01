@@ -39,18 +39,13 @@
         </div>
       </section>
 
-      <button id="notificationButton" class="notification-card" type="button">
-        <span class="notification-icon" aria-hidden="true">●</span>
-        <span class="notification-copy">
-          <strong>系统通知</strong>
-          <small id="notificationStatus">正在检查浏览器支持…</small>
-        </span>
-        <span class="notification-chevron" aria-hidden="true">›</span>
-      </button>
-
       <div class="drawer-footer">
         <span id="deviceDot" class="connection-dot pending"></span>
         <span id="deviceStatus">正在连接 Mac…</span>
+        <button id="notificationButton" class="notification-toggle" type="button" aria-label="系统通知" title="系统通知">
+          <span class="notification-bell" aria-hidden="true"></span>
+          <span id="notificationStatus" class="visually-hidden">正在检查浏览器支持…</span>
+        </button>
         <button id="tokenButton" class="plain-icon" type="button" aria-label="查看设备配对">•••</button>
       </div>
     </aside>
