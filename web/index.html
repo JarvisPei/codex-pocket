@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f7f7f5">
+    <title>Codex Pocket</title>
+    <link rel="stylesheet" href="/app.css">
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div id="drawerScrim" class="drawer-scrim" hidden></div>
+
+    <aside id="projectDrawer" class="project-drawer" aria-label="项目与任务">
+      <div class="drawer-brand">
+        <div class="codex-mark" aria-hidden="true">C</div>
+        <div>
+          <strong>Codex Pocket</strong>
+          <span>Desktop bridge</span>
+        </div>
+        <button id="closeDrawerButton" class="plain-icon drawer-close" type="button" aria-label="关闭项目列表">×</button>
+      </div>
+
+      <div class="drawer-section-title">
+        <span>Projects</span>
+        <button id="refreshThreadsButton" class="plain-icon" type="button" aria-label="刷新任务">↻</button>
+      </div>
+      <p id="projectsHint" class="drawer-hint">正在读取项目…</p>
+      <nav id="projectGroups" class="project-groups" aria-live="polite"></nav>
+
+      <section class="usage-card" aria-labelledby="usageTitle">
+        <div class="usage-heading">
+          <span id="usageTitle">Usage remaining</span>
+          <button id="refreshUsageButton" class="plain-icon" type="button" aria-label="刷新剩余用量">↻</button>
+        </div>
+        <div id="usageContent" class="usage-content" aria-live="polite">
+          <span class="usage-placeholder">打开抽屉后读取…</span>
+        </div>
+      </section>
+
+      <div class="drawer-footer">
+        <span id="deviceDot" class="connection-dot pending"></span>
+        <span id="deviceStatus">正在连接 Mac…</span>
+        <button id="tokenButton" class="plain-icon" type="button" aria-label="查看设备配对">•••</button>
+      </div>
+    </aside>
+
+    <div class="app-shell">
+      <header class="conversation-header">
+        <button id="openDrawerButton" class="header-button" type="button" aria-label="打开项目列表">☰</button>
+        <div class="header-title">
+          <span id="selectedProjectName">Codex Pocket</span>
+          <h1 id="selectedThreadTitle">选择一个任务</h1>
+        </div>
+        <div class="header-actions">
+          <div id="liveBadge" class="live-badge" hidden>
+            <span id="taskStateDot" class="connection-dot ready"></span>
+            <span id="liveBadgeLabel">Desktop</span>
+          </div>
+          <button id="refreshConversationButton" class="conversation-refresh" type="button" aria-label="只刷新当前对话" title="只刷新当前对话" disabled>↻</button>
+        </div>
+      </header>
+
+      <main id="conversationPane" class="conversation-pane">
+        <section id="emptyState" class="empty-state">
+          <div class="empty-icon" aria-hidden="true">⌘</div>
+          <h2>选择一个 Codex 任务</h2>
+          <p>任务按项目文件夹分组，历史记录保持只读，直到你主动发送新指令。</p>
+          <button id="emptyOpenDrawerButton" class="primary-button" type="button">浏览项目</button>
+        </section>
+
+        <section id="threadView" class="thread-view" hidden>
+          <div id="threadMeta" class="thread-meta"></div>
+          <div id="threadHistory" class="thread-history" aria-live="polite"></div>
+          <div id="managedLiveHistory" class="thread-history managed-live-history" aria-live="polite"></div>
+          <p id="historyNotice" class="history-notice"></p>
+        </section>
+      </main>
+
+      <footer class="composer-shell">
+        <div id="composerState" class="composer-state">选择任务后可查看历史</div>
+        <div class="composer">
+          <div id="composerAttachments" class="composer-attachments" hidden></div>
+          <textarea id="composerInput" rows="1" placeholder="后续可在这里继续任务…" disabled></textarea>
+          <div class="composer-toolbar">
+            <button id="attachmentButton" class="composer-tool" type="button" disabled aria-label="添加附件">＋</button>
+            <input id="attachmentInput" type="file" multiple hidden>
+            <span id="composerMode">只读历史</span>
+            <button id="modelSettingsButton" class="model-settings-button" type="button" disabled aria-label="更改当前任务的模型设置">
+              <span id="modelSettingsLabel">模型…</span>
+              <span aria-hidden="true">⌄</span>
+            </button>
+            <button id="composerActionButton" class="composer-action" type="button" disabled aria-label="发送或停止">
+              <span id="composerActionIcon" aria-hidden="true"></span>
+            </button>
+          </div>
+        </div>
+      </footer>
+    </div>
+
+    <button id="newContentButton" class="new-content-button" type="button" hidden>
+      <span aria-hidden="true">↓</span>
+      <span id="latestButtonLabel">回到最新</span>
+    </button>
+
+    <div id="scrollRail" class="scroll-rail" hidden aria-hidden="true">
+      <div id="scrollThumb" class="scroll-thumb"></div>
+    </div>
+
+    <dialog id="stopDialog">
+      <form method="dialog">
+        <p class="dialog-eyebrow">DESKTOP CONTROL</p>
+        <h2>停止当前任务？</h2>
+        <p>将停止 Mac 上正在运行的“<strong id="confirmTaskTitle"></strong>”。执行前会重新核对任务标题和唯一 Stop 控件。</p>
+        <div class="dialog-actions">
+          <button id="cancelButton" class="secondary-button" type="button">取消</button>
+          <button id="confirmButton" class="danger-button" type="button">确认停止</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="newTaskDialog">
+      <form id="newTaskForm" method="dialog">
+        <p class="dialog-eyebrow">NEW DESKTOP TASK</p>
+        <h2>新建任务</h2>
+        <p>任务将创建在 <strong id="newTaskDestination"></strong>，并切换到 Mac 上由 Desktop 执行。</p>
+        <label for="newTaskMessage">第一条指令</label>
+        <textarea id="newTaskMessage" rows="5" maxlength="20000" placeholder="告诉 Codex 要做什么…"></textarea>
+        <div id="newTaskAttachments" class="composer-attachments new-task-attachments" hidden></div>
+        <div class="new-task-attachment-row">
+          <button id="newTaskAttachmentButton" class="secondary-button new-task-attachment-button" type="button">＋ 添加文件</button>
+          <input id="newTaskAttachmentInput" type="file" multiple hidden>
+          <span>最多 4 个 · 单个 20 MB</span>
+        </div>
+        <p id="newTaskModelHint" class="model-option-description"></p>
+        <p id="newTaskError" class="form-error" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button id="newTaskCancel" class="secondary-button" type="button">取消</button>
+          <button id="newTaskSubmit" class="primary-button" type="submit">创建并发送</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="modelSettingsDialog">
+      <form id="modelSettingsForm" method="dialog">
+        <p class="dialog-eyebrow">SESSION MODEL</p>
+        <h2>模型设置</h2>
+        <p>只影响这个任务之后发送的新指令；正在运行时不能修改。</p>
+        <label for="modelSelect">模型</label>
+        <select id="modelSelect" required></select>
+        <p id="modelDescription" class="model-option-description"></p>
+        <label for="effortSelect">推理等级</label>
+        <select id="effortSelect" required></select>
+        <p id="effortDescription" class="model-option-description"></p>
+        <label id="fastModeRow" class="fast-mode-row" for="fastModeInput" hidden>
+          <span>
+            <strong>⚡ Fast</strong>
+            <small id="fastModeDescription">使用优先处理服务档位</small>
+          </span>
+          <input id="fastModeInput" type="checkbox">
+        </label>
+        <p id="modelSettingsError" class="form-error" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button id="modelSettingsCancel" class="secondary-button" type="button">取消</button>
+          <button id="modelSettingsSave" class="primary-button" type="submit">应用</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="tokenDialog">
+      <form id="tokenForm" method="dialog">
+        <p class="dialog-eyebrow">DEVICE ACCESS</p>
+        <h2>配对本机 Bridge</h2>
+        <p>推荐扫描 Mac 生成的一次性二维码。配对成功后，这台设备会保持登录，直到你在 Mac 上撤销它。</p>
+        <label for="tokenInput">配对信息</label>
+        <input id="tokenInput" type="password" minlength="20" autocomplete="off" required>
+        <p id="tokenError" class="form-error" aria-live="polite"></p>
+        <div class="dialog-actions">
+          <button id="tokenCancel" class="secondary-button" type="button">取消</button>
+          <button class="primary-button" type="submit">连接</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

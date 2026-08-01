@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.local.mobile-codex-bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__REPO_ROOT__/mac_bridge.py</string>
+    <string>--keychain-service</string>
+    <string>mobile-codex-bridge</string>
+    <string>--port</string>
+    <string>4317</string>
+    <string>--ax-helper</string>
+    <string>__AX_HELPER__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__REPO_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+    <key>PYTHONPYCACHEPREFIX</key>
+    <string>/private/tmp/mobile-codex-pycache</string>
+    <key>CLANG_MODULE_CACHE_PATH</key>
+    <string>/private/tmp/mobile-codex-clang-cache</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Interactive</string>
+
+  <key>StandardOutPath</key>
+  <string>__USER_LOG_DIR__/mobile-codex-bridge.log</string>
+  <key>StandardErrorPath</key>
+  <string>__USER_LOG_DIR__/mobile-codex-bridge.error.log</string>
+</dict>
+</plist>

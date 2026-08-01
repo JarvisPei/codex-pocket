@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>zh_CN</string>
+  <key>CFBundleDisplayName</key>
+  <string>Mobile Codex Bridge Helper</string>
+  <key>CFBundleExecutable</key>
+  <string>mobile-codex-ax</string>
+  <key>CFBundleIdentifier</key>
+  <string>com.local.mobile-codex-bridge.ax</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>MobileCodexBridgeHelper</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSAccessibilityUsageDescription</key>
+  <string>读取并定位 Codex 任务，在用户从已配对设备发送指令后写入输入框、按下 Send，或在明确确认后按下 Stop。</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>仅在用户从已配对设备发送图片时，通过 macOS System Events 执行标准粘贴，将图片附加到当前 Codex 任务。</string>
+</dict>
+</plist>

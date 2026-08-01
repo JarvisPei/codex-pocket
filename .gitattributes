@@ -6,4 +6,3 @@
 *.ps1 text eol=crlf
 *.cmd text eol=crlf
 *.spec text eol=lf
-
