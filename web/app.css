@@ -337,6 +337,9 @@ button { -webkit-tap-highlight-color: transparent; }
   text-transform: none;
   white-space: nowrap;
 }
+.history-item.agentMessage .history-timestamp {
+  margin-left: 0;
+}
 .history-message-attachments {
   margin: 3px 0 9px;
   display: flex;
