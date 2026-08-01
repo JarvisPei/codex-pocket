@@ -329,16 +329,13 @@ button { -webkit-tap-highlight-color: transparent; }
 }
 .history-item.userMessage .history-label { color: #3b7e59; }
 .history-timestamp {
-  margin-left: auto;
+  margin-left: 0;
   color: #999994;
   font-size: 10px;
   font-weight: 520;
   letter-spacing: 0;
   text-transform: none;
   white-space: nowrap;
-}
-.history-item.agentMessage .history-timestamp {
-  margin-left: 0;
 }
 .history-message-attachments {
   margin: 3px 0 9px;
