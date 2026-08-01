@@ -117,6 +117,20 @@ class DesktopMessageConfirmationTest(unittest.TestCase):
         sleep.assert_called_once_with(0.1)
 
 
+class AccessibilityHelperSourceTest(unittest.TestCase):
+    def test_enables_electron_web_accessibility_before_task_scanning(self):
+        source = (
+            Path(__file__).resolve().parents[1] / "scripts" / "codex-ax.swift"
+        ).read_text(encoding="utf-8")
+
+        manual_accessibility = source.index('"AXManualAccessibility" as CFString')
+        task_scanning = source.index("func currentTaskTitles()")
+        self.assertLess(manual_accessibility, task_scanning)
+        self.assertIn("func navigateToVisibleSidebarTask", source)
+        self.assertIn("title == expectedTitle", source)
+        self.assertIn("guard candidates.count == 1", source)
+
+
 class CodexAppServerManagedTurnTest(unittest.TestCase):
     def setUp(self):
         self.client = CodexAppServerClient(Path("/private/tmp/fake-codex"))

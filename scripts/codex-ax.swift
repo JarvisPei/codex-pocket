@@ -132,6 +132,19 @@ guard let app = NSWorkspace.shared.runningApplications.first(where: {
 }
 
 let root = AXUIElementCreateApplication(app.processIdentifier)
+// Electron exposes its Chromium web-content accessibility tree lazily. Codex
+// Desktop can therefore appear as only an opaque AXScrollArea until an
+// assistive client explicitly enables manual accessibility. Keep the strict
+// semantic checks below, but make the web roles available before scanning.
+let manualAccessibilityResult = AXUIElementSetAttributeValue(
+    root,
+    "AXManualAccessibility" as CFString,
+    kCFBooleanTrue
+)
+if manualAccessibilityResult == .success {
+    // The renderer publishes the tree asynchronously after the first toggle.
+    Thread.sleep(forTimeInterval: 0.15)
+}
 let stopTerms = [
     "stop", "cancel", "interrupt", "abort",
     "停止", "中止", "取消", "打断",
@@ -333,6 +346,60 @@ func currentTaskTitles() -> [String] {
         }
     }
     return titles
+}
+
+func visibleSidebarTaskButtons(titled expectedTitle: String) -> [AXUIElement] {
+    var visitedElements = Set<CFHashCode>()
+    var matches: [AXUIElement] = []
+
+    for window in activeWindows() {
+        guard
+            let windowPosition = pointAttribute(window, kAXPositionAttribute as CFString),
+            let windowSize = sizeAttribute(window, kAXSizeAttribute as CFString)
+        else { continue }
+        let sidebarRight = windowPosition.x + min(390, windowSize.width * 0.32)
+        let windowBottom = windowPosition.y + windowSize.height
+
+        func scan(_ element: AXUIElement, depth: Int) {
+            guard depth <= 32 else { return }
+            let hash = CFHash(element)
+            guard visitedElements.insert(hash).inserted else { return }
+
+            let role = stringAttribute(element, kAXRoleAttribute as CFString) ?? ""
+            let title = stringAttribute(element, kAXTitleAttribute as CFString)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if role == kAXButtonRole as String,
+               title == expectedTitle,
+               actions(element).contains(kAXPressAction as String),
+               (attribute(element, kAXEnabledAttribute as CFString) as? Bool) != false,
+               let position = pointAttribute(element, kAXPositionAttribute as CFString),
+               let size = sizeAttribute(element, kAXSizeAttribute as CFString),
+               size.width > 0,
+               size.height > 0,
+               position.x >= windowPosition.x,
+               position.x < sidebarRight,
+               position.y >= windowPosition.y + 45,
+               position.y < windowBottom
+            {
+                matches.append(element)
+            }
+
+            for child in children(element) {
+                scan(child, depth: depth + 1)
+            }
+        }
+
+        scan(window, depth: 0)
+    }
+    return matches
+}
+
+func navigateToVisibleSidebarTask(titled expectedTitle: String) -> Bool {
+    let candidates = visibleSidebarTaskButtons(titled: expectedTitle)
+    guard candidates.count == 1 else { return false }
+    let candidate = candidates[0]
+    _ = AXUIElementPerformAction(candidate, "AXScrollToVisible" as CFString)
+    return AXUIElementPerformAction(candidate, kAXPressAction as CFString) == .success
 }
 
 func exactSemanticMatch(_ element: AXUIElement, terms: Set<String>) -> Bool {
@@ -1229,8 +1296,21 @@ func performDesktopSend() {
             break
         }
     }
+    if !titleMatched, navigateToVisibleSidebarTask(titled: expectedTitle) {
+        for _ in 0..<50 {
+            Thread.sleep(forTimeInterval: 0.1)
+            let titles = currentTaskTitles()
+            if titles.count == 1, titles[0] == expectedTitle {
+                titleMatched = true
+                break
+            }
+        }
+    }
     guard titleMatched else {
-        failDesktopSend("Codex task identity did not match after navigation.", code: 26)
+        failDesktopSend(
+            "Codex task identity did not match after deep-link and unique visible sidebar navigation.",
+            code: 26
+        )
     }
 
     var candidates = composerCandidates()
