@@ -160,6 +160,10 @@ python3 -m unittest tests.test_mac_bridge
 - Bridge 依赖 Codex Desktop 当前的 Accessibility 结构；Desktop UI 大幅变化时可能需要更新 Helper。
 - 只支持单用户、单 Mac 的私人部署，不是多人 SaaS。
 
+## 致谢
+
+Codex Pocket 最初基于 [StarsTom/mobileCodexHelper](https://github.com/StarsTom/mobileCodexHelper) 的开源工作展开。感谢 StarsTom 提供了从手机远程访问本机 Codex 的初始思路与实现基础。
+
 ## License
 
 GPL-3.0，见 [LICENSE](LICENSE)。

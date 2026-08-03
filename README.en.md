@@ -142,6 +142,10 @@ python3 -m unittest tests.test_mac_bridge
 - The helper depends on Codex Desktop's current Accessibility structure and may need updates after major Desktop UI changes.
 - This is a private single-user, single-Mac deployment, not a multi-user SaaS service.
 
+## Acknowledgements
+
+Codex Pocket initially grew from the open-source work in [StarsTom/mobileCodexHelper](https://github.com/StarsTom/mobileCodexHelper). Thanks to StarsTom for the original idea and implementation foundation for privately accessing a local Codex session from a phone.
+
 ## License
 
 GPL-3.0. See [LICENSE](LICENSE).
