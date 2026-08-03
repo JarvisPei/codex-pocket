@@ -2,7 +2,7 @@
 
 [中文](README.md)
 
-View and control Codex Desktop on your Mac from an Android phone while keeping Desktop as the real task owner and execution host.
+View and control Codex Desktop on your Mac from a phone, tablet, or other modern browser while keeping Desktop as the real task owner and execution host.
 
 Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own tailnet through Tailscale Serve. The phone does not sign in to ChatGPT and never receives Codex credentials, a general shell, or remote-desktop access.
 
@@ -21,7 +21,7 @@ Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own ta
 - Handle one-shot command/file approvals and structured user questions.
 - Pair with a five-minute single-use QR ticket and revoke individual devices.
 - Refresh long conversations incrementally with a new-content indicator and draggable scrollbar.
-- Optionally show Android system notifications when a task completes, pauses, or needs confirmation; tapping returns to that task.
+- Optionally show browser system notifications, when supported by the platform, when a task completes, pauses, or needs confirmation; tapping returns to that task.
 - Optionally use hotspot-local HTTPS to bypass distant DERP relays when the phone also provides the Mac's hotspot.
 
 System notifications are off by default and must be enabled from the mobile drawer. They contain only the task title and state, never response text. This implementation requires the Codex Pocket page to remain open or in the browser background; fully terminating the browser stops polling, and no notification content is sent to a third-party push service.
@@ -31,7 +31,7 @@ Locked-screen background mode is enabled only when the bridge positively detects
 ## Architecture
 
 ```text
-Android browser
+Modern browser (phone, tablet, or computer)
       │
       │ Tailscale HTTPS (tailnet only)
       ▼
@@ -54,7 +54,7 @@ The bridge always binds to loopback. It never exposes the raw app-server transpo
 - macOS and Codex Desktop (`/Applications/ChatGPT.app`)
 - Apple Command Line Tools to build the dedicated Accessibility Helper
 - Tailscale with Serve recommended for tailnet-only HTTPS
-- Android or another modern mobile browser
+- A browser with HTTPS, `localStorage`, and modern JavaScript support (primarily tested on Android)
 
 For long-running remote use while a MacBook is locked or closed, we recommend the free [Amphetamine app from the Mac App Store](https://apps.apple.com/app/amphetamine/id937984704?mt=12) to keep the system awake. Enable **Allow Display Sleep**; to keep working with the lid closed, disable **Allow system sleep when display is closed**. Preventing system sleep increases power use and heat, so connect power and ensure ventilation for extended sessions. Amphetamine is an optional power-management aid, not a replacement for Tailscale or Codex Pocket's security controls.
 
@@ -89,7 +89,7 @@ Open the HTTPS URL assigned by Tailscale.
 
 ## Local phone-hotspot access (optional)
 
-When the Android control phone also provides the Mac's hotspot, carrier NAT can force Tailscale through a distant DERP relay. While both devices are in that topology, run on the Mac:
+When the control phone also provides the Mac's hotspot, carrier NAT can force Tailscale through a distant DERP relay. While both devices are in that topology, run on the Mac (currently tested primarily with Android hotspots):
 
 ```sh
 zsh scripts/install-local-hotspot-proxy.sh [port]
@@ -97,9 +97,9 @@ zsh scripts/install-local-hotspot-proxy.sh [port]
 
 The installer records the current Mac hotspot address, phone gateway, and Wi-Fi interface. It creates a separate TLS reverse proxy that activates only when all three match. The main Bridge remains on `127.0.0.1:4317`, and the local CA has critical name constraints limited to the configured hotspot IP and `codex-pocket.local`.
 
-After installation, open the drawer through the existing Tailscale URL and tap `⌁`. Download and install the CA in Android's certificate settings, return to the page, then choose **Switch to local**. A five-minute, single-use handoff ticket enrolls a separate credential for the local HTTPS origin. The local listener pauses when the configured hotspot is no longer active.
+After installation, open the drawer through the existing Tailscale URL and tap `⌁`. Download and install the CA through the device's certificate settings (choose **Install CA certificate** on Android), return to the page, then choose **Switch to local**. A five-minute, single-use handoff ticket enrolls a separate credential for the local HTTPS origin. The local listener pauses when the configured hotspot is no longer active.
 
-## Pair a phone
+## Pair a browser device
 
 Generate a five-minute, single-use QR code on the Mac:
 
@@ -109,7 +109,7 @@ swift scripts/create-pairing-qr.swift \
   /private/tmp/codex-pocket-pairing.png
 ```
 
-Scan it on the phone. The device credential is stored in that browser's `localStorage`, so closing the tab or restarting the phone does not require pairing again. Treat the QR image as a temporary secret and delete it after pairing.
+Scan it on the target device. The device credential is stored in that browser's `localStorage`, so closing the tab or restarting the device does not require pairing again. Treat the QR image as a temporary secret and delete it after pairing.
 
 List or revoke paired devices:
 
@@ -123,7 +123,7 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 - Loopback binding only.
 - The optional hotspot listener is a separate TLS process restricted to one configured IP, gateway, interface, and Host allowlist; it only proxies to loopback.
 - No CORS, general shell, arbitrary JSON-RPC, or raw app-server proxy.
-- Each phone receives a separate random credential; the Mac stores only its SHA-256 digest.
+- Each paired browser receives a separate random credential; the Mac stores only its SHA-256 digest.
 - The Keychain master credential never leaves the Mac.
 - Desktop send verifies the exact thread id, task title, empty composer, and unique Send control.
 - Attachments are isolated per paired device, stored in a mode-`0700` upload directory, expire after one hour, and are rejected by the Helper if their path leaves that directory.

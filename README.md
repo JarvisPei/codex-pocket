@@ -2,7 +2,7 @@
 
 [English](README.en.md)
 
-在 Android 手机上查看和控制 Mac 上的 Codex Desktop，同时让 Desktop 保持任务的真正执行者。
+在手机、平板或其他现代浏览器中查看和控制 Mac 上的 Codex Desktop，同时让 Desktop 保持任务的真正执行者。
 
 Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve 暴露给自己的 tailnet。手机不需要登录 ChatGPT，也不会获得 Codex 凭据、通用终端或远程桌面权限。
 
@@ -21,7 +21,7 @@ Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve
 - 处理一次性命令/文件批准与结构化用户问题。
 - 五分钟单次配对二维码、每台设备独立凭据和设备撤销。
 - 长对话增量刷新、新内容提示和可拖动滚动条。
-- 可选 Android 系统通知：任务完成、暂停或需要确认时提醒，点击可回到对应任务。
+- 可选浏览器系统通知：在平台支持时，于任务完成、暂停或需要确认时提醒，点击可回到对应任务。
 - 可选热点本地 HTTPS：手机同时为 Mac 提供热点时，绕过远端 DERP 中继直接访问。
 
 系统通知默认关闭，需要在手机抽屉中主动开启。通知只包含任务标题和状态，不包含回复正文。当前实现依赖 Codex Pocket 页面仍打开或保留在浏览器后台；彻底结束浏览器进程后不会继续轮询，也没有把通知内容交给第三方推送平台。
@@ -31,7 +31,7 @@ Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve
 ## 工作方式
 
 ```text
-Android 浏览器
+现代浏览器（手机、平板或电脑）
       │
       │ Tailscale HTTPS（仅 tailnet）
       ▼
@@ -54,7 +54,7 @@ Bridge 始终只监听 loopback。Codex app-server 的原始传输、ChatGPT 登
 - macOS 与 Codex Desktop（`/Applications/ChatGPT.app`）
 - Apple Command Line Tools，用于编译专用 Accessibility Helper
 - Tailscale，推荐使用 Serve 提供 tailnet 内 HTTPS
-- Android 或其他现代移动浏览器
+- 支持 HTTPS、`localStorage` 和现代 JavaScript 的浏览器（主要在 Android 上测试）
 
 MacBook 需要长期锁屏或合盖远程运行时，推荐安装免费的 [Amphetamine（Mac App Store）](https://apps.apple.com/app/amphetamine/id937984704?mt=12) 来保持系统唤醒。建议开启 **Allow Display Sleep**；如果需要合盖继续运行，则关闭 **Allow system sleep when display is closed**。阻止系统睡眠会增加耗电和发热，长时间使用时建议连接电源并保证散热。Amphetamine 只是可选的电源管理辅助，不替代 Tailscale 或 Codex Pocket 的安全设置。
 
@@ -94,7 +94,7 @@ tailscale serve status
 
 ## 手机热点本地直连（可选）
 
-当 Android 手机同时作为热点和控制端时，运营商 NAT 可能让 Tailscale 退回远端 DERP。保持手机与 Mac 都在该热点拓扑下，在 Mac 运行：
+当手机同时作为热点和控制端时，运营商 NAT 可能让 Tailscale 退回远端 DERP。保持手机与 Mac 都在该热点拓扑下，在 Mac 运行（当前主要在 Android 热点上测试）：
 
 ```sh
 zsh scripts/install-local-hotspot-proxy.sh [port]
@@ -109,13 +109,13 @@ zsh scripts/install-local-hotspot-proxy.sh [port]
 
 安装后先通过原 Tailscale 页面打开抽屉，点击底部的 `⌁`：
 
-1. 下载 CA 证书，并在 Android 的“安装 CA 证书”设置中安装；
+1. 下载 CA 证书，并通过当前系统的证书设置安装（Android 中选择“安装 CA 证书”）；
 2. 返回页面，再次点击 `⌁`，选择“切换到本地”；
 3. 页面会使用五分钟单次票据为本地 HTTPS origin 建立独立设备凭据。
 
 离开该热点后，本地代理会暂停监听；从本地页面可切回保存的 Tailscale origin。证书私钥只保存在 Mac 用户目录，权限为 `0600`。
 
-## 配对手机
+## 配对浏览器设备
 
 在 Mac 上生成五分钟有效、只能使用一次的二维码：
 
@@ -125,7 +125,7 @@ swift scripts/create-pairing-qr.swift \
   /private/tmp/codex-pocket-pairing.png
 ```
 
-用手机扫描并完成配对。设备凭据保存在该浏览器的 `localStorage`，关闭标签页或重启手机不会要求重新配对。二维码属于临时秘密，配对完成后应删除。
+用目标设备扫描并完成配对。设备凭据保存在该浏览器的 `localStorage`，关闭标签页或重启设备不会要求重新配对。二维码属于临时秘密，配对完成后应删除。
 
 查看或撤销设备：
 
@@ -139,8 +139,8 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 - 仅允许绑定 `127.0.0.1`。
 - 可选热点代理是独立 TLS 进程；只反向代理到 loopback，并锁定预配置的 IP、网关、接口与 Host。
 - 不提供 CORS、通用 shell、任意 JSON-RPC 或原始 app-server 代理。
-- 每台手机拥有独立随机凭据；Mac 只保存其 SHA-256 摘要。
-- Keychain 主凭据不会发送到手机。
+- 每个配对浏览器拥有独立随机凭据；Mac 只保存其 SHA-256 摘要。
+- Keychain 主凭据不会发送到浏览器设备。
 - Desktop 发送前验证精确任务 ID、任务标题、空输入框和唯一 Send 控件。
 - 附件按配对设备隔离，只写入权限为 `0700` 的专用目录；一小时过期，Helper 拒绝目录外路径。
 - Stop 必须经过显式确认，并且只能按下唯一语义 Stop 控件。
