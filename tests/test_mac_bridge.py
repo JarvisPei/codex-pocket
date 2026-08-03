@@ -23,11 +23,54 @@ from mac_bridge import (
     load_token,
     read_mac_battery,
     read_local_hotspot_status,
+    read_screen_lock_state,
+    thread_turn_is_active,
     thread_user_message_fingerprints,
 )
 
 
 TOKEN = "t" * 32
+
+
+class ScreenLockProbeTest(unittest.TestCase):
+    @patch("mac_bridge.subprocess.run")
+    def test_reads_locked_console_state(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stdout = '  "IOConsoleLocked" = Yes\n'
+        self.assertIs(read_screen_lock_state(), True)
+
+    @patch("mac_bridge.subprocess.run")
+    def test_unknown_console_state_does_not_enable_background_mode(self, run):
+        run.return_value.returncode = 0
+        run.return_value.stdout = '  "IOConsoleUsers" = ()\n'
+        self.assertIsNone(read_screen_lock_state())
+
+    def test_rollout_activity_blocks_background_takeover(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rollout-desktop-live.jsonl"
+            path.write_text(
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "payload": {
+                            "type": "task_started",
+                            "turn_id": "desktop-live",
+                            "started_at": 123,
+                        },
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                thread_turn_is_active(
+                    {
+                        "id": "desktop-live",
+                        "path": str(path),
+                        "turns": [{"id": "old", "status": "completed"}],
+                    }
+                )
+            )
 
 
 class ThreadProjectInferenceTest(unittest.TestCase):
@@ -198,8 +241,18 @@ class AccessibilityHelperSourceTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
 
         manual_accessibility = source.index('"AXManualAccessibility" as CFString')
+        enhanced_accessibility = source.index(
+            '"AXEnhancedUserInterface" as CFString'
+        )
         task_scanning = source.index("func currentTaskTitles()")
+        readiness_call = source.index("_ = prepareElectronAccessibilityTree()")
+        command_dispatch = source.index("if options.desktopRequestRespond")
         self.assertLess(manual_accessibility, task_scanning)
+        self.assertLess(enhanced_accessibility, task_scanning)
+        self.assertLess(readiness_call, command_dispatch)
+        self.assertIn("func electronAccessibilityTreeIsReady", source)
+        self.assertIn("Date().addingTimeInterval(timeout)", source)
+        self.assertIn('actions(element).contains("AXScrollToVisible")', source)
         self.assertIn("func navigateToVisibleSidebarTask", source)
         self.assertIn("title == expectedTitle", source)
         self.assertIn("guard candidates.count == 1", source)
@@ -488,6 +541,7 @@ class FakeAppServer:
                     "preview": "检查移动页面",
                     "cwd": "/workspace/project",
                     "updatedAt": 123,
+                    "isPinned": True,
                     "status": {"type": "notLoaded"},
                 },
                 {
@@ -896,6 +950,12 @@ class BridgeApiTest(unittest.TestCase):
                         }
                     },
                     "projectless-thread-ids": ["thread-2"],
+                    "pinned-thread-ids": ["thread-2"],
+                    "electron-persisted-atom-state": {
+                        "unread-thread-ids-by-host-v1": {
+                            "local": ["thread-2"],
+                        }
+                    },
                 }
             ),
             encoding="utf-8",
@@ -910,6 +970,7 @@ class BridgeApiTest(unittest.TestCase):
                 Path(self.state_directory.name) / "uploads"
             ),
             projectless_root=Path(self.state_directory.name) / "Codex",
+            screen_lock_probe=lambda: False,
         )
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -1010,6 +1071,8 @@ class BridgeApiTest(unittest.TestCase):
         self.assertIn("newTaskDialog", body)
         self.assertNotIn("新建任务（即将开放）", body)
         self.assertIn("Usage remaining", body)
+        self.assertIn("Active / Needs attention", body)
+        self.assertIn("focusThreads", body)
         self.assertIn("notificationButton", body)
         self.assertIn("macBattery", body)
         self.assertIn("connectionLatency", body)
@@ -1051,6 +1114,7 @@ class BridgeApiTest(unittest.TestCase):
         source = gzip.decompress(body)
         self.assertIn(b"openThread", source)
         self.assertIn(b"PROJECT_THREAD_PREVIEW_LIMIT", source)
+        self.assertIn(b"drawerFocusThreads", source)
         self.assertIn(b"Show more", source)
 
     def test_attachment_upload_requires_a_paired_device(self):
@@ -1158,6 +1222,12 @@ class BridgeApiTest(unittest.TestCase):
         self.assertEqual(payload["threads"][1]["collection"], "recent")
         self.assertIsNone(payload["threads"][1]["project"])
         self.assertNotIn("turns", payload["threads"][0])
+        self.assertTrue(payload["threads"][0]["isPinned"])
+        self.assertTrue(payload["threads"][1]["isPinned"])
+        self.assertFalse(payload["threads"][0]["isUnread"])
+        self.assertTrue(payload["threads"][1]["isUnread"])
+        self.assertEqual(payload["threads"][0]["managedStatus"], "")
+        self.assertFalse(payload["threads"][0]["needsAttention"])
         self.assertEqual(
             payload["projects"],
             [
@@ -1169,6 +1239,34 @@ class BridgeApiTest(unittest.TestCase):
                 }
             ],
         )
+
+    def test_thread_catalog_marks_managed_requests_as_needing_attention(self):
+        self.app_server.runs["thread-1"] = {
+            "threadId": "thread-1",
+            "status": "waitingForInput",
+            "pendingRequest": {"id": "request-1", "kind": "userInput"},
+        }
+
+        status, payload = self.request("GET", "/api/codex/threads?limit=20")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["threads"][0]["managedStatus"], "waitingForInput")
+        self.assertTrue(payload["threads"][0]["needsAttention"])
+
+    def test_marking_thread_read_updates_desktop_unread_state(self):
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads/thread-2/read",
+            {},
+        )
+
+        self.assertEqual(status, 200)
+        self.assertFalse(payload["isUnread"])
+        state = json.loads(self.codex_state_path.read_text(encoding="utf-8"))
+        unread = state["electron-persisted-atom-state"][
+            "unread-thread-ids-by-host-v1"
+        ]["local"]
+        self.assertNotIn("thread-2", unread)
 
     def test_thread_list_preserves_last_complete_project_index(self):
         status, payload = self.request("GET", "/api/codex/threads?limit=20")
@@ -1229,6 +1327,49 @@ class BridgeApiTest(unittest.TestCase):
             "project-id",
         )
         self.assertNotIn("thread-new-1", state["projectless-thread-ids"])
+
+    def test_creates_project_task_in_background_when_screen_is_locked(self):
+        self.server.screen_lock_probe = lambda: True
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads",
+            {"projectId": "project-id", "message": "锁屏时继续开发"},
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["mode"], "background")
+        self.assertEqual(payload["run"]["status"], "inProgress")
+        self.assertEqual(
+            self.app_server.started,
+            [("thread-new-1", "锁屏时继续开发")],
+        )
+        self.assertEqual(self.controller.desktop_sent, [])
+
+    def test_locked_new_task_with_attachment_requires_unlock(self):
+        self.server.screen_lock_probe = lambda: True
+        device = self.enroll_device()
+        upload_status, upload = self.upload_attachment(
+            device["deviceToken"],
+            name="locked.png",
+            body=b"png",
+        )
+        self.assertEqual(upload_status, 201)
+
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads",
+            {
+                "projectId": "project-id",
+                "message": "分析附件",
+                "attachmentIds": [upload["attachment"]["id"]],
+            },
+            bearer=device["deviceToken"],
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "screen_locked_attachments_unsupported")
+        self.assertEqual(self.app_server.created_threads, [])
+        self.assertEqual(self.controller.desktop_sent, [])
 
     def test_creates_recent_task_without_project_assignment(self):
         self.controller.count = 0
@@ -1493,6 +1634,75 @@ class BridgeApiTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIsNone(payload["run"])
 
+    def test_dispatches_text_in_background_when_screen_is_locked(self):
+        self.server.screen_lock_probe = lambda: True
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads/thread-1/turn",
+            {"message": "锁屏后继续修复"},
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["mode"], "background")
+        self.assertEqual(payload["run"]["status"], "inProgress")
+        self.assertEqual(
+            self.app_server.started,
+            [("thread-1", "锁屏后继续修复")],
+        )
+        self.assertEqual(self.controller.desktop_sent, [])
+
+    def test_locked_background_dispatch_refuses_active_thread(self):
+        self.server.screen_lock_probe = lambda: True
+        self.app_server.last_turn_status = "inProgress"
+
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads/thread-1/turn",
+            {"message": "不要并发"},
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "desktop_turn_active")
+        self.assertEqual(self.app_server.started, [])
+
+    def test_unknown_lock_state_keeps_desktop_dispatch(self):
+        self.server.screen_lock_probe = lambda: None
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads/thread-1/turn",
+            {"message": "状态不明时走 Desktop"},
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["mode"], "desktop")
+        self.assertEqual(self.app_server.started, [])
+        self.assertEqual(len(self.controller.desktop_sent), 1)
+
+    def test_locked_existing_attachment_requires_unlock(self):
+        self.server.screen_lock_probe = lambda: True
+        device = self.enroll_device()
+        upload_status, upload = self.upload_attachment(
+            device["deviceToken"],
+            name="locked.txt",
+            body=b"locked",
+        )
+        self.assertEqual(upload_status, 201)
+
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads/thread-1/turn",
+            {
+                "message": "查看附件",
+                "attachmentIds": [upload["attachment"]["id"]],
+            },
+            bearer=device["deviceToken"],
+        )
+
+        self.assertEqual(status, 409)
+        self.assertEqual(payload["error"], "screen_locked_attachments_unsupported")
+        self.assertEqual(self.app_server.started, [])
+        self.assertEqual(self.controller.desktop_sent, [])
+
     def test_interrupts_legacy_managed_turn(self):
         self.app_server.runs["thread-1"] = {
             "threadId": "thread-1",
@@ -1524,6 +1734,21 @@ class BridgeApiTest(unittest.TestCase):
             self.controller.desktop_sent,
             [("thread-1", "修复移动页面", "", True)],
         )
+
+    def test_continues_interrupted_turn_in_background_when_locked(self):
+        self.server.screen_lock_probe = lambda: True
+        self.app_server.last_turn_status = "interrupted"
+
+        status, payload = self.request(
+            "POST",
+            "/api/codex/threads/thread-1/continue",
+            {},
+        )
+
+        self.assertEqual(status, 202)
+        self.assertEqual(payload["mode"], "background")
+        self.assertEqual(self.app_server.continued, ["thread-1"])
+        self.assertEqual(self.controller.desktop_sent, [])
 
     def test_refuses_continue_when_latest_turn_is_not_interrupted(self):
         self.controller.task_title = "修复移动页面"

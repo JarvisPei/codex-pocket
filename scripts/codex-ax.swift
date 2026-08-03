@@ -134,16 +134,22 @@ guard let app = NSWorkspace.shared.runningApplications.first(where: {
 let root = AXUIElementCreateApplication(app.processIdentifier)
 // Electron exposes its Chromium web-content accessibility tree lazily. Codex
 // Desktop can therefore appear as only an opaque AXScrollArea until an
-// assistive client explicitly enables manual accessibility. Keep the strict
-// semantic checks below, but make the web roles available before scanning.
-let manualAccessibilityResult = AXUIElementSetAttributeValue(
-    root,
-    "AXManualAccessibility" as CFString,
-    kCFBooleanTrue
-)
-if manualAccessibilityResult == .success {
-    // The renderer publishes the tree asynchronously after the first toggle.
-    Thread.sleep(forTimeInterval: 0.15)
+// assistive client explicitly enables accessibility. New Chromium builds can
+// react to either the legacy manual switch or the enhanced-UI switch, so set
+// both without weakening any of the semantic checks used for actions below.
+@discardableResult
+func enableElectronAccessibility() -> Bool {
+    let manualResult = AXUIElementSetAttributeValue(
+        root,
+        "AXManualAccessibility" as CFString,
+        kCFBooleanTrue
+    )
+    let enhancedResult = AXUIElementSetAttributeValue(
+        root,
+        "AXEnhancedUserInterface" as CFString,
+        kCFBooleanTrue
+    )
+    return manualResult == .success || enhancedResult == .success
 }
 let stopTerms = [
     "stop", "cancel", "interrupt", "abort",
@@ -171,6 +177,47 @@ func activeWindows() -> [AXUIElement] {
         return [focused as! AXUIElement]
     }
     return attribute(root, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+}
+
+func electronAccessibilityTreeIsReady() -> Bool {
+    var visitedElements = Set<CFHashCode>()
+
+    func hasPublishedWebDescendant(_ element: AXUIElement, depth: Int) -> Bool {
+        guard depth <= 10 else { return false }
+        let hash = CFHash(element)
+        guard visitedElements.insert(hash).inserted else { return false }
+
+        let role = stringAttribute(element, kAXRoleAttribute as CFString) ?? ""
+        if role != kAXWindowRole as String,
+           role != kAXScrollAreaRole as String,
+           actions(element).contains("AXScrollToVisible")
+        {
+            return true
+        }
+        for child in children(element) {
+            if hasPublishedWebDescendant(child, depth: depth + 1) {
+                return true
+            }
+        }
+        return false
+    }
+
+    return activeWindows().contains(where: {
+        hasPublishedWebDescendant($0, depth: 0)
+    })
+}
+
+@discardableResult
+func prepareElectronAccessibilityTree(timeout: TimeInterval = 5.0) -> Bool {
+    _ = enableElectronAccessibility()
+    let deadline = Date().addingTimeInterval(timeout)
+    while true {
+        if electronAccessibilityTreeIsReady() {
+            return true
+        }
+        guard Date() < deadline else { return false }
+        Thread.sleep(forTimeInterval: 0.1)
+    }
 }
 
 func scanBottomOfWindows(performStop: Bool, checkStop: Bool) {
@@ -1637,6 +1684,8 @@ func walk(_ element: AXUIElement, depth: Int, path: String) {
         walk(child, depth: depth + 1, path: "\(path)/\(role)[\(index)]")
     }
 }
+
+_ = prepareElectronAccessibilityTree()
 
 if options.desktopRequestRespond {
     performDesktopRequestResponse()

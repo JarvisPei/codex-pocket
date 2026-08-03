@@ -64,8 +64,16 @@ it never persists the Keychain master token.
 
 The bridge starts the Codex Desktop bundle's version-matched
 `codex app-server --stdio` as a private child process for bounded history reads.
-New phone instructions are not executed by that child: they are deep-linked to
-the real Desktop task and submitted through its semantic Accessibility controls.
+While macOS is unlocked, new phone instructions are deep-linked to the real
+Desktop task and submitted through its semantic Accessibility controls. When
+the console is positively detected as locked, text-only instructions may use
+the already-connected child as a bounded background execution fallback; those
+turns remain persisted and visible in Desktop history. Unknown lock state fails
+closed to the normal Desktop path, and attachments require unlocking first.
+Background turns remain persisted in Codex history. A new task is read normally
+when Desktop first opens it, but an older task already held by Desktop's own
+app-server may require a manual Codex restart before externally written turns
+appear. The bridge does not switch or restart Desktop automatically.
 The raw app-server transport is never exposed on HTTP or Tailscale. The
 authenticated mobile API exposes only:
 
@@ -79,8 +87,8 @@ authenticated mobile API exposes only:
   per-device temporary uploads. Files are limited to 20 MB and expire after one hour.
 - `POST /api/codex/threads/<id>/continue` to press Desktop Continue only when the
   latest persisted turn is still `interrupted`.
-- Legacy managed-run read/interrupt/request routes remain temporarily available
-  only for runs created before the Desktop-dispatch migration.
+- Managed-run read/interrupt/request routes expose only background turns started
+  by this bridge, including their one-shot approvals and structured questions.
 
 The history serializer includes user/agent messages plus bounded command and
 file-change summaries. It excludes raw reasoning and truncates large fields.
@@ -149,11 +157,12 @@ Managed command and file approvals support only `accept`, `decline`, or
 amendments. Raw reasoning, arbitrary JSON-RPC methods, arbitrary Mac file paths,
 and general shell access remain unavailable.
 
-Desktop owns every new phone-started turn and newly created task. The private
-history app-server still
-does not share Desktop's in-memory runtime status, so Accessibility remains the
-authority for foreground running/stop state; persisted history is used only for
-messages and terminal turn status.
+Desktop owns phone-started work while the console is unlocked. A positively
+detected lock permits text-only turns to run through the bridge's existing
+app-server connection; the same connection supplies their live status, Stop,
+and bounded interaction requests. Accessibility remains the authority for
+foreground Desktop running/stop state, and the two paths reject ambiguous or
+concurrent ownership.
 
 To pair an Android browser without copying the Keychain token into a terminal,
 generate a temporary QR code on the Mac:

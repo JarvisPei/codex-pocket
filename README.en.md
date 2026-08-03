@@ -9,9 +9,11 @@ Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own ta
 ## Features
 
 - Mirror Codex Desktop Projects and Recents.
+- Collect running, attention-required, Desktop-unread, and pinned tasks at the top of the drawer; opening a task on mobile acknowledges it as read while preserving its Project/Recents placement.
 - Create a task inside a Project or Recents and hand its first instruction to Desktop.
 - Read recent messages, final answers, and position-preserving `Working` / `Worked` activity summaries.
 - Send follow-up instructions to existing Desktop tasks.
+- When macOS is definitely locked, start text-only tasks and follow-ups through the already-connected app-server while preserving them in Desktop history.
 - Attach files or images from mobile, up to four files and 20 MB per file.
 - Distinguish running, paused, and completed tasks and safely stop any running Desktop turn after an ID-based task switch.
 - Change the task model, reasoning effort, and Fast service tier.
@@ -23,6 +25,8 @@ Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own ta
 - Optionally use hotspot-local HTTPS to bypass distant DERP relays when the phone also provides the Mac's hotspot.
 
 System notifications are off by default and must be enabled from the mobile drawer. They contain only the task title and state, never response text. This implementation requires the Codex Pocket page to remain open or in the browser background; fully terminating the browser stops polling, and no notification content is sent to a third-party push service.
+
+Locked-screen background mode is enabled only when the bridge positively detects that macOS is locked, and currently supports text only. Requests with attachments require unlocking first; an unknown lock state keeps the existing Desktop path. Background turns remain persisted in Codex history. New tasks load normally when first opened in Desktop, while an older task already loaded by Desktop may require a manual Codex restart before externally written turns appear. The bridge never switches or restarts Desktop automatically. The Mac must remain system-awake, although its display may sleep.
 
 ## Architecture
 

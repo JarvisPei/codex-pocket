@@ -4,6 +4,9 @@ const elements = {
   openDrawerButton: document.querySelector("#openDrawerButton"),
   emptyOpenDrawerButton: document.querySelector("#emptyOpenDrawerButton"),
   closeDrawerButton: document.querySelector("#closeDrawerButton"),
+  focusSection: document.querySelector("#focusSection"),
+  focusCount: document.querySelector("#focusCount"),
+  focusThreads: document.querySelector("#focusThreads"),
   refreshThreadsButton: document.querySelector("#refreshThreadsButton"),
   projectsHint: document.querySelector("#projectsHint"),
   projectGroups: document.querySelector("#projectGroups"),
@@ -1476,7 +1479,9 @@ function updateComposerState() {
     || (isDesktopThread && currentStopCandidates === 1)
   ) {
     badgeKind = "running";
-    badgeLabel = isSendingMessage ? "启动中" : "运行中";
+    badgeLabel = isSendingMessage
+      ? "启动中"
+      : (isManagedThread ? "后台运行中" : "运行中");
     dotKind = "error";
   } else if (isPaused) {
     badgeKind = "unknown";
@@ -1498,7 +1503,7 @@ function updateComposerState() {
   elements.liveBadgeLabel.textContent = badgeLabel;
   elements.taskStateDot.className = `connection-dot ${dotKind}`;
   let stateText = "选择任务后可查看历史";
-  let modeText = "Managed";
+  let modeText = "后台";
   let actionIsStop = false;
   let actionIsContinue = false;
   let actionDisabled = true;
@@ -1506,16 +1511,16 @@ function updateComposerState() {
   if (!selectedThread) {
     modeText = "只读历史";
   } else if (isSendingMessage) {
-    stateText = "正在由 Mac Desktop 启动任务…";
-    modeText = "Desktop";
+    stateText = "正在由 Mac 启动任务…";
+    modeText = "Mac";
   } else if (isManagedThread) {
     stateText = {
-      starting: "正在恢复任务…",
-      inProgress: "Managed 任务运行中 · 点红色按钮可停止",
+      starting: "正在后台启动任务…",
+      inProgress: "锁屏后台任务运行中 · 点红色按钮可停止",
       waitingForInput: "任务正在等待你的确认",
-      interrupting: "正在停止 Managed 任务…",
-    }[managedRun.status] || "Managed 任务正在运行";
-    modeText = "Managed · 运行中";
+      interrupting: "正在停止后台任务…",
+    }[managedRun.status] || "后台任务正在运行";
+    modeText = "后台 · 运行中";
     actionIsStop = true;
     actionDisabled = (
       managedRun.status === "starting"
@@ -1554,7 +1559,7 @@ function updateComposerState() {
     actionDisabled = !hasComposerContent;
     if (managedForSelected && managedRun?.status === "failed") {
       stateText = `上个任务失败：${managedRun.error || "未知错误"}`;
-      modeText = "Managed · 失败";
+      modeText = "后台 · 失败";
     } else {
       stateText = "历史任务 · 可从手机继续";
       modeText = "历史";
@@ -1599,13 +1604,101 @@ function updateComposerState() {
 }
 
 function drawerThreadIsRunning(thread, liveThreadId) {
+  const managedStatus = String(thread.managedStatus || "");
   return Boolean(
     thread.activityStatus === "inProgress"
+    || ACTIVE_TURN_STATUSES.has(managedStatus)
     || (
       thread.id === liveThreadId
       && (currentStopCandidates === 1 || desktopActivityIsRecent())
     )
   );
+}
+
+function drawerThreadNeedsAttention(thread, liveThreadId) {
+  return Boolean(
+    thread.needsAttention
+    || (thread.id === liveThreadId && desktopRequest?.fingerprint)
+    || thread.activityStatus === "failed"
+    || thread.managedStatus === "failed"
+  );
+}
+
+function drawerFocusThreads(liveThreadId) {
+  const rank = (thread) => {
+    if (drawerThreadNeedsAttention(thread, liveThreadId)) return 0;
+    if (drawerThreadIsRunning(thread, liveThreadId)) return 1;
+    if (thread.isUnread === true) return 2;
+    return 3;
+  };
+  const updatedAt = (thread) => {
+    const numeric = Number(thread.updatedAt);
+    if (Number.isFinite(numeric)) return numeric;
+    const parsed = Date.parse(String(thread.updatedAt || ""));
+    return Number.isFinite(parsed) ? parsed : 0;
+  };
+  return threads
+    .filter((thread) => (
+      drawerThreadNeedsAttention(thread, liveThreadId)
+      || drawerThreadIsRunning(thread, liveThreadId)
+      || thread.isUnread === true
+      || thread.isPinned === true
+    ))
+    .sort((left, right) => rank(left) - rank(right) || updatedAt(right) - updatedAt(left));
+}
+
+function createFocusThreadButton(thread, liveThreadId) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "drawer-thread focus-thread";
+  if (thread.id === selectedThread?.id) button.classList.add("active");
+
+  const copy = document.createElement("span");
+  copy.className = "focus-thread-copy";
+  const title = document.createElement("span");
+  title.className = "drawer-thread-title";
+  title.textContent = thread.title;
+  const context = document.createElement("small");
+  context.className = "focus-thread-context";
+  context.textContent = thread.collection === "project"
+    ? (thread.project?.name || "Project")
+    : "Recents";
+  copy.append(title, context);
+  button.append(copy);
+
+  const needsAttention = drawerThreadNeedsAttention(thread, liveThreadId);
+  const isRunning = drawerThreadIsRunning(thread, liveThreadId);
+  const isUnread = thread.isUnread === true;
+  const state = document.createElement("span");
+  state.className = `drawer-thread-state ${
+    needsAttention
+      ? "attention"
+      : (isRunning ? "running" : (isUnread ? "unread" : "pinned"))
+  }`;
+  const dot = document.createElement("span");
+  dot.className = "thread-state-dot";
+  const label = document.createElement("span");
+  label.textContent = needsAttention
+    ? "需处理"
+    : (isRunning ? "运行中" : (isUnread ? "未读" : "Pinned"));
+  state.append(dot, label);
+  button.append(state);
+  button.addEventListener("click", () => openThread(thread.id));
+  return button;
+}
+
+function renderFocusThreads(liveThreadId) {
+  const focusThreads = drawerFocusThreads(liveThreadId);
+  elements.focusThreads.replaceChildren();
+  elements.focusSection.hidden = focusThreads.length === 0;
+  elements.focusCount.textContent = focusThreads.length ? String(focusThreads.length) : "";
+  for (const thread of focusThreads) {
+    try {
+      elements.focusThreads.append(createFocusThreadButton(thread, liveThreadId));
+    } catch {
+      elements.focusThreads.append(createSafeThreadButton(thread, liveThreadId, true));
+    }
+  }
 }
 
 function createThreadButton(thread, liveThreadId, isRecent = false) {
@@ -1901,6 +1994,8 @@ async function createNewTask() {
         const dispatchMessages = {
           desktop_accessibility_unavailable: "空任务已创建，但后台 Helper 的辅助功能授权已失效；请在 Mac 上重新开关授权后重试。",
           desktop_attachment_unconfirmed: "空任务已创建，但 Desktop 没有确认附件；指令和附件已保留，可重试。",
+          managed_turn_active: "空任务已创建，但后台任务状态发生冲突；指令已保留，可重试。",
+          managed_turn_start_failed: "空任务已创建，但锁屏后台模式未能启动；指令已保留，可重试。",
         };
         elements.composerState.textContent = dispatchMessages[result.error]
           || "任务已创建，但 Desktop 没有确认发送；指令已保留，可重试。";
@@ -1908,6 +2003,7 @@ async function createNewTask() {
       }
       const messages = {
         desktop_turn_active: "新任务自身已经开始运行，请刷新列表确认状态。",
+        screen_locked_attachments_unsupported: "Mac 已锁屏；后台模式暂时只支持纯文本，请解锁后再发送附件。",
         invalid_project: "这个 Project 已发生变化，请刷新列表。",
         project_path_missing: "这个 Project 没有可用的本地目录。",
         projectless_directory_failed: "无法创建 Recents 的独立工作目录。",
@@ -1931,21 +2027,28 @@ async function createNewTask() {
       });
     }
     currentTaskTitle = result.desktop?.taskTitle || createdThread.title;
-    currentStopCandidates = Number(result.desktop?.stopCandidates) || 1;
-    desktopStatusKnown = true;
+    currentStopCandidates = result.mode === "desktop"
+      ? (Number(result.desktop?.stopCandidates) || 1)
+      : 0;
+    desktopStatusKnown = result.mode === "desktop";
     selectedThreadLastTurnStatus = "inProgress";
     selectedThreadHasFinalAnswer = false;
     selectedThreadRuntimeStatus = "active";
-    desktopDispatchState = {
+    desktopDispatchState = result.mode === "desktop" ? {
       threadId: createdThread.id,
       baselineTurnId: "",
       startedAt: Date.now(),
-    };
+    } : undefined;
+    managedRun = result.mode === "background" ? result.run : undefined;
+    managedRenderSignature = "";
     localStorage.setItem(SELECTED_THREAD_KEY, createdThread.id);
     newTaskAttachments = [];
     renderNewTaskAttachments();
     elements.newTaskDialog.close();
     await openThread(createdThread.id, { fresh: true, closeDrawer: true });
+    if (result.mode === "background") {
+      setDeviceState("ready", "Mac 在线 · 锁屏后台运行");
+    }
     updateComposerState();
     window.setTimeout(refreshStatus, 600);
   } catch {
@@ -2112,6 +2215,14 @@ function renderProjectGroups() {
     section.append(createSafeThreadButton(thread, liveThreadId, true));
   }
   elements.projectGroups.append(section);
+
+  // The aggregate is optional UI. Render the canonical Project/Recents tree
+  // first so a stale cached page or malformed focus item can never blank it.
+  try {
+    renderFocusThreads(liveThreadId);
+  } catch {
+    if (elements.focusSection) elements.focusSection.hidden = true;
+  }
 }
 
 function appendTextWithBreaks(parent, value) {
@@ -3450,7 +3561,7 @@ async function refreshManagedRun(threadId = selectedThread?.id) {
     }
   } catch {
     if (managedRunIsActive()) {
-      elements.composerState.textContent = "Managed 状态暂时不可用，正在重试…";
+      elements.composerState.textContent = "后台状态暂时不可用，正在重试…";
     }
   }
 }
@@ -3538,6 +3649,10 @@ async function startManagedTurn({ continueOnly = false } = {}) {
         feedback = "附件已过期或不可用，请移除后重新选择";
         return;
       }
+      if (result.error === "screen_locked_attachments_unsupported") {
+        feedback = "Mac 已锁屏；后台模式暂时只支持纯文本，请解锁后再发送附件";
+        return;
+      }
       if (result.error === "foreground_task_changed") {
         feedback = "Desktop 任务刚刚切换，请确认后重新发送";
         await refreshStatus();
@@ -3552,7 +3667,7 @@ async function startManagedTurn({ continueOnly = false } = {}) {
         return;
       }
       if (result.error === "managed_turn_active") {
-        feedback = "这个任务已有 Managed turn 正在运行";
+        feedback = "这个任务已有后台任务正在运行";
         await refreshManagedRun(threadId);
         return;
       }
@@ -3635,7 +3750,7 @@ function continueInterruptedTurn() {
 async function interruptManagedTurn() {
   if (!selectedThread || !managedRunIsActive() || !managedRun?.turnId) return;
   elements.composerActionButton.disabled = true;
-  elements.composerState.textContent = "正在停止 Managed 任务…";
+  elements.composerState.textContent = "正在停止后台任务…";
   try {
     const response = await fetch(
       `/api/codex/threads/${encodeURIComponent(selectedThread.id)}/interrupt`,
@@ -3671,6 +3786,21 @@ async function openThread(threadId, options = {}) {
     threadDrafts.set(selectedThread.id, elements.composerInput.value);
   }
   selectedThread = summary;
+  if (summary.isUnread === true) {
+    summary.isUnread = false;
+    void fetch(`/api/codex/threads/${encodeURIComponent(threadId)}/read`, {
+      method: "POST",
+      headers: {
+        ...authorizationHeaders(),
+        "Content-Type": "application/json",
+      },
+      body: "{}",
+      cache: "no-store",
+    }).catch(() => {
+      // The next catalog refresh restores the Desktop source of truth if the
+      // optimistic read acknowledgement could not be persisted.
+    });
+  }
   if (isThreadSwitch) hideNewContentNotice();
   selectedThreadLastTurnId = "";
   selectedThreadLastTurnStatus = "";
@@ -3942,6 +4072,7 @@ async function refreshStatusOnce() {
       && (
         previousTitle !== currentTaskTitle
         || previousStopCandidates !== currentStopCandidates
+        || previousRequestFingerprint !== nextRequestFingerprint
       )
     ) renderProjectGroups();
     if (previousRequestFingerprint !== nextRequestFingerprint) {

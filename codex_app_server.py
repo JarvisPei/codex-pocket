@@ -884,17 +884,39 @@ def _status(value: Any) -> dict[str, Any]:
 
 
 def load_codex_project_index(state_path: Path) -> dict[str, Any]:
-    """Read only the project metadata Codex Desktop uses for its sidebar."""
+    """Read the small set of Codex Desktop sidebar metadata we mirror."""
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return {"projects": {}, "assignments": {}}
+        return {
+            "projects": {},
+            "assignments": {},
+            "pinnedThreadIds": set(),
+            "unreadThreadIds": set(),
+        }
     if not isinstance(state, dict):
-        return {"projects": {}, "assignments": {}}
+        return {
+            "projects": {},
+            "assignments": {},
+            "pinnedThreadIds": set(),
+            "unreadThreadIds": set(),
+        }
 
     raw_projects = state.get("local-projects")
     raw_order = state.get("project-order")
     raw_assignments = state.get("thread-project-assignments")
+    raw_pinned_thread_ids = state.get("pinned-thread-ids")
+    persisted_atoms = state.get("electron-persisted-atom-state")
+    unread_by_host = (
+        persisted_atoms.get("unread-thread-ids-by-host-v1")
+        if isinstance(persisted_atoms, dict)
+        else None
+    )
+    raw_unread_thread_ids = (
+        unread_by_host.get("local")
+        if isinstance(unread_by_host, dict)
+        else None
+    )
     order = {
         str(project_id): index
         for index, project_id in enumerate(raw_order)
@@ -934,7 +956,72 @@ def load_codex_project_index(state_path: Path) -> dict[str, Any]:
             project_id = str(value.get("projectId", ""))
             if project_id in projects:
                 assignments[str(thread_id)] = project_id
-    return {"projects": projects, "assignments": assignments}
+    pinned_thread_ids = {
+        str(thread_id)
+        for thread_id in raw_pinned_thread_ids
+        if isinstance(thread_id, str) and thread_id
+    } if isinstance(raw_pinned_thread_ids, list) else set()
+    unread_thread_ids = {
+        str(thread_id)
+        for thread_id in raw_unread_thread_ids
+        if isinstance(thread_id, str) and thread_id
+    } if isinstance(raw_unread_thread_ids, list) else set()
+    return {
+        "projects": projects,
+        "assignments": assignments,
+        "pinnedThreadIds": pinned_thread_ids,
+        "unreadThreadIds": unread_thread_ids,
+    }
+
+
+def set_codex_thread_unread_state(
+    state_path: Path,
+    thread_id: str,
+    unread: bool,
+) -> None:
+    """Update the local-host unread set persisted by Codex Desktop."""
+    with _PROJECT_STATE_LOCK:
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise AppServerError("Unable to read Codex unread state.") from error
+        if not isinstance(state, dict):
+            raise AppServerError("Invalid Codex unread state.")
+        persisted_atoms = state.get("electron-persisted-atom-state")
+        if not isinstance(persisted_atoms, dict):
+            persisted_atoms = {}
+            state["electron-persisted-atom-state"] = persisted_atoms
+        unread_by_host = persisted_atoms.get("unread-thread-ids-by-host-v1")
+        if not isinstance(unread_by_host, dict):
+            unread_by_host = {}
+            persisted_atoms["unread-thread-ids-by-host-v1"] = unread_by_host
+        local_ids = unread_by_host.get("local")
+        normalized = [
+            str(value)
+            for value in local_ids
+            if isinstance(value, str) and value and value != thread_id
+        ] if isinstance(local_ids, list) else []
+        if unread:
+            normalized.append(thread_id)
+        unread_by_host["local"] = normalized
+
+        temporary = state_path.with_name(
+            f".{state_path.name}.mobile-codex-{secrets.token_hex(6)}"
+        )
+        try:
+            original_mode = state_path.stat().st_mode & 0o777
+            temporary.write_text(
+                json.dumps(state, ensure_ascii=False, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            os.chmod(temporary, original_mode)
+            os.replace(temporary, state_path)
+        except OSError as error:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise AppServerError("Unable to update Codex unread state.") from error
 
 
 def assign_codex_thread_collection(
@@ -1042,6 +1129,16 @@ def summarize_thread(
                     "order": candidate.get("order", 0),
                 }
     activity_snapshot = _rollout_activity_snapshot(thread)
+    pinned_thread_ids = (
+        project_index.get("pinnedThreadIds", set())
+        if isinstance(project_index, dict)
+        else set()
+    )
+    unread_thread_ids = (
+        project_index.get("unreadThreadIds", set())
+        if isinstance(project_index, dict)
+        else set()
+    )
     return {
         "id": thread_id,
         "title": _bounded_text(title or "未命名任务", 240),
@@ -1051,7 +1148,13 @@ def summarize_thread(
         "project": project,
         "createdAt": thread.get("createdAt"),
         "updatedAt": thread.get("updatedAt"),
-        "isPinned": bool(thread.get("isPinned", False)),
+        # Current Codex Desktop persists pins in global UI state, while some
+        # app-server builds also expose isPinned directly. Accept both.
+        "isPinned": bool(
+            thread.get("isPinned", False)
+            or thread_id in pinned_thread_ids
+        ),
+        "isUnread": bool(thread_id in unread_thread_ids),
         "status": _status(thread.get("status")),
         "activityStatus": activity_snapshot["status"],
         "source": thread.get("source"),

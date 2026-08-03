@@ -9,9 +9,11 @@ Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve
 ## 已实现
 
 - 按 Codex Desktop 的 Projects 和 Recents 展示持久化任务。
+- 在抽屉顶部聚合运行中、需要处理、Desktop 未读和已置顶的任务；手机打开任务会同步已读状态，同时保留原有 Project/Recents 归属。
 - 在 Project 或 Recents 中新建任务，并交给 Desktop 执行第一条指令。
 - 查看最近历史、最终回复及按原位置穿插的 `Working` / `Worked` 活动摘要。
 - 从手机向已有 Desktop 任务发送后续指令。
+- Mac 明确处于锁屏状态时，纯文本新任务和后续指令可由已连接的 app-server 在后台运行，并继续写入 Desktop 历史。
 - 从手机附加文件或图片；每条最多 4 个、单个最多 20 MB。
 - 查看运行、暂停、完成状态，并按任务 ID 切换后安全停止任意运行中的 Desktop 任务。
 - 修改任务的模型、推理等级和 Fast 服务档位。
@@ -23,6 +25,8 @@ Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve
 - 可选热点本地 HTTPS：手机同时为 Mac 提供热点时，绕过远端 DERP 中继直接访问。
 
 系统通知默认关闭，需要在手机抽屉中主动开启。通知只包含任务标题和状态，不包含回复正文。当前实现依赖 Codex Pocket 页面仍打开或保留在浏览器后台；彻底结束浏览器进程后不会继续轮询，也没有把通知内容交给第三方推送平台。
+
+锁屏后台模式只在 Bridge 明确检测到 macOS 已锁屏时启用，并且目前仅支持纯文本。包含附件的请求会要求先解锁；锁屏状态未知时继续采用原有 Desktop 路径。后台任务会持久化到 Codex 历史；新建任务可在 Desktop 首次打开时正常读取，已被 Desktop 加载过的旧任务可能需要手动重启 Codex 才能显示外部写入的新 turn。Bridge 不会自动切换或重启 Desktop。使用该模式时需要让 Mac 保持系统唤醒，显示器可以熄灭。
 
 ## 工作方式
 

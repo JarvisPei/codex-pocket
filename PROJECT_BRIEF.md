@@ -75,6 +75,11 @@ primary desktop UI and execution host.
   allowlisted `thread/list` and `thread/read` access.
 - The mobile UI uses Codex Desktop's project assignments for collapsible
   Projects and puts projectless chats in Recents.
+- A top-of-drawer Active / Needs attention section collects running tasks,
+  explicit pending requests, failures, Desktop-unread tasks, and pinned tasks without
+  removing them from their Project or Recents collection.
+- Opening an unread task on mobile acknowledges it in Codex Desktop's persisted
+  local-host unread state; Desktop read-state changes flow back on catalog refresh.
 - The mobile UI can browse stored tasks and a bounded, reasoning-free history.
   Agent replies are rendered as a safe DOM-built Markdown subset with mobile
   styling for headings, lists, quotes, links, code blocks, and tables.
@@ -85,6 +90,10 @@ primary desktop UI and execution host.
   details rather than nested disclosures. A touch-sized draggable scroll
   handle supports fast navigation through long mobile histories.
 - Idle persisted threads can be resumed from the phone with text-only input.
+- When `IOConsoleLocked` positively reports a locked console, pure-text new
+  tasks, follow-ups, and interrupted-turn continuations use the bridge's
+  already-connected app-server. Unknown lock state keeps the Desktop path;
+  attachments require unlocking first.
 - Managed agent-message deltas and bounded tool/file events stream into the
   conversation through authenticated polling.
 - Managed turns use native `turn/interrupt`.

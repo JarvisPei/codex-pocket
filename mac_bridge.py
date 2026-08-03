@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 from codex_app_server import (
     AppServerError,
@@ -35,6 +35,7 @@ from codex_app_server import (
     load_codex_project_index,
     summarize_thread,
     summarize_thread_detail,
+    set_codex_thread_unread_state,
 )
 
 
@@ -57,6 +58,69 @@ LOCAL_HOTSPOT_CA_PATH = LOCAL_HOTSPOT_STATE_DIR / "local-hotspot-tls" / "local-c
 
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def read_screen_lock_state() -> Optional[bool]:
+    """Return whether the macOS console is locked, or None when unknown."""
+    try:
+        result = subprocess.run(
+            ["/usr/sbin/ioreg", "-n", "Root", "-d1"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    match = re.search(r'"IOConsoleLocked"\s*=\s*(Yes|No)', result.stdout)
+    if match is None:
+        return None
+    return match.group(1) == "Yes"
+
+
+def latest_turn_status(thread: dict[str, Any]) -> str:
+    turns = thread.get("turns")
+    last_turn = turns[-1] if isinstance(turns, list) and turns else None
+    return str(last_turn.get("status", "")) if isinstance(last_turn, dict) else ""
+
+
+def thread_turn_is_active(thread: dict[str, Any]) -> bool:
+    active_statuses = {
+        "starting",
+        "inProgress",
+        "waitingForInput",
+        "interrupting",
+    }
+    if latest_turn_status(thread) in active_statuses:
+        return True
+    try:
+        detail = summarize_thread_detail(thread)
+    except Exception:
+        # Starting a second turn is riskier than making the user retry.
+        return True
+    if str(detail.get("activityStatus", "")) in active_statuses:
+        return True
+    turns = detail.get("turns")
+    tail = turns[-1] if isinstance(turns, list) and turns else None
+    return isinstance(tail, dict) and tail.get("status") in active_statuses
+
+
+def summarize_thread_catalog_entry(
+    thread: dict[str, Any],
+    project_index: dict[str, Any],
+    app_server: CodexAppServerClient,
+) -> dict[str, Any]:
+    """Add Bridge-owned live state to the stable Desktop thread summary."""
+    summary = summarize_thread(thread, project_index)
+    run = app_server.managed_run(summary["id"])
+    summary["managedStatus"] = ""
+    summary["needsAttention"] = False
+    if isinstance(run, dict):
+        summary["managedStatus"] = str(run.get("status", ""))[:40]
+        summary["needsAttention"] = isinstance(run.get("pendingRequest"), dict)
+    return summary
 
 
 def thread_history_cursor(detail: dict[str, Any]) -> dict[str, str]:
@@ -1183,6 +1247,7 @@ class BridgeServer(ThreadingHTTPServer):
         codex_state_path: Optional[Path] = None,
         attachment_store: Optional[AttachmentStore] = None,
         projectless_root: Optional[Path] = None,
+        screen_lock_probe: Optional[Callable[[], Optional[bool]]] = None,
     ) -> None:
         self.token = token
         self.controller = controller
@@ -1205,6 +1270,7 @@ class BridgeServer(ThreadingHTTPServer):
             projectless_root
             or Path.home() / "Documents" / "Codex"
         )
+        self.screen_lock_probe = screen_lock_probe or read_screen_lock_state
         self._project_index_lock = threading.RLock()
         self._project_index = load_codex_project_index(self.codex_state_path)
         self._project_index_shrink_seen_at: Optional[float] = None
@@ -1213,6 +1279,17 @@ class BridgeServer(ThreadingHTTPServer):
         ] = OrderedDict()
         self._thread_detail_cache_lock = threading.RLock()
         super().__init__(address, BridgeHandler)
+
+    def screen_lock_state(self) -> Optional[bool]:
+        try:
+            state = self.screen_lock_probe()
+        except Exception:
+            return None
+        return state if isinstance(state, bool) else None
+
+    def screen_is_locked(self) -> bool:
+        """Fail closed: background dispatch is allowed only on a definite lock."""
+        return self.screen_lock_state() is True
 
     def project_index(self) -> dict[str, Any]:
         """Keep a last-known complete sidebar while Desktop rewrites its state."""
@@ -1593,7 +1670,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "projects": safe_project_catalog(project_index),
                     "threads": [
-                        summarize_thread(thread, project_index)
+                        summarize_thread_catalog_entry(
+                            thread,
+                            project_index,
+                            self.server.app_server,
+                        )
                         for thread in threads
                         if isinstance(thread, dict)
                     ],
@@ -1895,6 +1976,17 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
                 return
 
+            screen_locked = self.server.screen_is_locked()
+            if screen_locked and attachments:
+                self._send_json(
+                    HTTPStatus.CONFLICT,
+                    {
+                        "ok": False,
+                        "error": "screen_locked_attachments_unsupported",
+                    },
+                )
+                return
+
             project_index = self.server.project_index()
             projects = project_index.get("projects")
             project = projects.get(project_id) if isinstance(projects, dict) else None
@@ -1976,6 +2068,48 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         "error": "project_assignment_failed",
                         "threadCreated": True,
                         "threadId": thread_id,
+                    },
+                )
+                return
+            if screen_locked:
+                try:
+                    run = self.server.app_server.start_turn(
+                        thread_id,
+                        message.strip(),
+                    )
+                except ManagedTurnConflict:
+                    self._send_json(
+                        HTTPStatus.CONFLICT,
+                        {
+                            "ok": False,
+                            "error": "managed_turn_active",
+                            "threadCreated": True,
+                            "threadId": thread_id,
+                        },
+                    )
+                    return
+                except (ManagedRequestError, AppServerError):
+                    refreshed_index = self.server.project_index()
+                    self._send_json(
+                        HTTPStatus.BAD_GATEWAY,
+                        {
+                            "ok": False,
+                            "error": "managed_turn_start_failed",
+                            "threadCreated": True,
+                            "threadId": thread_id,
+                            "thread": summarize_thread(thread, refreshed_index),
+                        },
+                    )
+                    return
+                refreshed_index = self.server.project_index()
+                self._send_json(
+                    HTTPStatus.ACCEPTED,
+                    {
+                        "ok": True,
+                        "mode": "background",
+                        "thread": summarize_thread(thread, refreshed_index),
+                        "settings": created.get("settings"),
+                        "run": run,
                     },
                 )
                 return
@@ -2072,6 +2206,27 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             payload = self._read_json()
             if payload is None:
+                return
+            if len(parts) == 2 and parts[1] == "read":
+                try:
+                    set_codex_thread_unread_state(
+                        self.server.codex_state_path,
+                        thread_id,
+                        False,
+                    )
+                    # Refresh the cached sidebar metadata immediately so the
+                    # next catalog request sees the read state we just wrote.
+                    self.server.project_index()
+                except AppServerError:
+                    self._send_json(
+                        HTTPStatus.BAD_GATEWAY,
+                        {"ok": False, "error": "thread_read_state_failed"},
+                    )
+                    return
+                self._send_json(
+                    HTTPStatus.OK,
+                    {"ok": True, "threadId": thread_id, "isUnread": False},
+                )
                 return
             if len(parts) == 2 and parts[1] == "settings":
                 model = payload.get("model")
@@ -2190,6 +2345,49 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             {"ok": False, "error": "thread_not_interrupted"},
                         )
                         return
+                if self.server.screen_is_locked():
+                    if attachments:
+                        self._send_json(
+                            HTTPStatus.CONFLICT,
+                            {
+                                "ok": False,
+                                "error": "screen_locked_attachments_unsupported",
+                            },
+                        )
+                        return
+                    if thread_turn_is_active(thread):
+                        self._send_json(
+                            HTTPStatus.CONFLICT,
+                            {"ok": False, "error": "desktop_turn_active"},
+                        )
+                        return
+                    try:
+                        run = (
+                            self.server.app_server.continue_turn(thread_id)
+                            if is_continue
+                            else self.server.app_server.start_turn(
+                                thread_id,
+                                message.strip(),
+                            )
+                        )
+                    except ManagedTurnConflict:
+                        self._send_json(
+                            HTTPStatus.CONFLICT,
+                            {"ok": False, "error": "managed_turn_active"},
+                        )
+                        return
+                    except (ManagedRequestError, AppServerError):
+                        self._send_json(
+                            HTTPStatus.BAD_GATEWAY,
+                            {"ok": False, "error": "managed_turn_start_failed"},
+                        )
+                        return
+                    self.server.invalidate_thread_detail(thread_id)
+                    self._send_json(
+                        HTTPStatus.ACCEPTED,
+                        {"ok": True, "mode": "background", "run": run},
+                    )
+                    return
                 previous_user_messages = thread_user_message_fingerprints(thread)
                 try:
                     desktop = self.server.controller.send_to_desktop(
