@@ -101,6 +101,8 @@ const SELECTED_THREAD_KEY = "mobileCodexSelectedThread";
 const COLLAPSED_PROJECTS_KEY = "mobileCodexCollapsedProjects";
 const NOTIFICATIONS_ENABLED_KEY = "mobileCodexNotificationsEnabled";
 const REMOTE_ORIGIN_KEY = "codexPocketRemoteOrigin";
+const THREAD_READ_REVISIONS_KEY = "codexPocketThreadReadRevisionsV1";
+const UNREAD_BASELINE_KEY = "codexPocketUnreadBaselineV2";
 const INITIAL_HISTORY_TURNS = 30;
 const MAX_HISTORY_TURNS = 60;
 const THREAD_CACHE_TTL_MS = 60_000;
@@ -169,6 +171,7 @@ let systemMetricsRefreshPromise;
 let systemMetricsLastRefreshedAt = 0;
 let localHotspotStatus = { configured: false, active: false };
 const bridgeLatencySamples = [];
+let threadReadRevisions = loadThreadReadRevisions();
 let isSendingMessage = false;
 let isUploadingAttachments = false;
 let isCreatingTask = false;
@@ -646,8 +649,84 @@ function updateProjectsHint() {
     : "没有找到持久化任务";
 }
 
+function loadThreadReadRevisions() {
+  try {
+    const value = JSON.parse(localStorage.getItem(THREAD_READ_REVISIONS_KEY) || "{}");
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([threadId, revision]) => (
+          typeof threadId === "string"
+          && threadId
+          && typeof revision === "string"
+          && revision
+        ))
+        .slice(-200),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function saveThreadReadRevisions() {
+  try {
+    localStorage.setItem(
+      THREAD_READ_REVISIONS_KEY,
+      JSON.stringify(Object.fromEntries(Object.entries(threadReadRevisions).slice(-200))),
+    );
+  } catch {
+    // Read receipts are a display hint; storage failures must not block tasks.
+  }
+}
+
+function threadCatalogRevision(thread) {
+  return String(thread?.updatedAt || "");
+}
+
+function acknowledgeThreadRead(threadOrId) {
+  const thread = typeof threadOrId === "string"
+    ? threads.find((candidate) => candidate.id === threadOrId)
+    : threadOrId;
+  if (!thread?.id) return false;
+  const revision = threadCatalogRevision(thread);
+  if (!revision) return false;
+  const changed = thread.isUnread === true;
+  thread.isUnread = false;
+  if (threadReadRevisions[thread.id] !== revision) {
+    delete threadReadRevisions[thread.id];
+    threadReadRevisions[thread.id] = revision;
+    saveThreadReadRevisions();
+  }
+  return changed;
+}
+
+function applyThreadReadReceipts(nextThreads) {
+  const establishBaseline = !localStorage.getItem(UNREAD_BASELINE_KEY);
+  let receiptsChanged = false;
+  for (const thread of nextThreads) {
+    if (!thread?.id) continue;
+    const revision = threadCatalogRevision(thread);
+    if (!revision) continue;
+    if (establishBaseline && thread.isUnread === true) {
+      delete threadReadRevisions[thread.id];
+      threadReadRevisions[thread.id] = revision;
+      receiptsChanged = true;
+    }
+    if (threadReadRevisions[thread.id] === revision) thread.isUnread = false;
+  }
+  if (receiptsChanged) saveThreadReadRevisions();
+  if (establishBaseline) {
+    try {
+      localStorage.setItem(UNREAD_BASELINE_KEY, "1");
+    } catch {
+      // A future refresh can safely retry establishing the baseline.
+    }
+  }
+}
+
 function reconcileThreadCatalog(result) {
   if (!Array.isArray(result.projects) || !Array.isArray(result.threads)) return false;
+  applyThreadReadReceipts(result.threads);
   observeThreadNotificationStates(result.threads, {
     prime: !threadNotificationsPrimed,
   });
@@ -3786,8 +3865,9 @@ async function openThread(threadId, options = {}) {
     threadDrafts.set(selectedThread.id, elements.composerInput.value);
   }
   selectedThread = summary;
-  if (summary.isUnread === true) {
-    summary.isUnread = false;
+  const wasUnread = summary.isUnread === true;
+  acknowledgeThreadRead(summary);
+  if (wasUnread) {
     void fetch(`/api/codex/threads/${encodeURIComponent(threadId)}/read`, {
       method: "POST",
       headers: {
@@ -4035,6 +4115,9 @@ async function refreshStatusOnce() {
     }
     desktopRequestNotificationsPrimed = true;
     const foregroundThreadId = uniqueCurrentThreadId();
+    const foregroundReadChanged = foregroundThreadId
+      ? acknowledgeThreadRead(foregroundThreadId)
+      : false;
     if (
       currentStopCandidates === 1
       && foregroundThreadId
@@ -4073,6 +4156,7 @@ async function refreshStatusOnce() {
         previousTitle !== currentTaskTitle
         || previousStopCandidates !== currentStopCandidates
         || previousRequestFingerprint !== nextRequestFingerprint
+        || foregroundReadChanged
       )
     ) renderProjectGroups();
     if (previousRequestFingerprint !== nextRequestFingerprint) {

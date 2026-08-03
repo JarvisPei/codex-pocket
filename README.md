@@ -56,6 +56,8 @@ Bridge 始终只监听 loopback。Codex app-server 的原始传输、ChatGPT 登
 - Tailscale，推荐使用 Serve 提供 tailnet 内 HTTPS
 - Android 或其他现代移动浏览器
 
+MacBook 需要长期锁屏或合盖远程运行时，推荐安装免费的 [Amphetamine（Mac App Store）](https://apps.apple.com/app/amphetamine/id937984704?mt=12) 来保持系统唤醒。建议开启 **Allow Display Sleep**；如果需要合盖继续运行，则关闭 **Allow system sleep when display is closed**。阻止系统睡眠会增加耗电和发热，长时间使用时建议连接电源并保证散热。Amphetamine 只是可选的电源管理辅助，不替代 Tailscale 或 Codex Pocket 的安全设置。
+
 ## 安装 Bridge
 
 ```sh

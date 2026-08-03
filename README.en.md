@@ -56,6 +56,8 @@ The bridge always binds to loopback. It never exposes the raw app-server transpo
 - Tailscale with Serve recommended for tailnet-only HTTPS
 - Android or another modern mobile browser
 
+For long-running remote use while a MacBook is locked or closed, we recommend the free [Amphetamine app from the Mac App Store](https://apps.apple.com/app/amphetamine/id937984704?mt=12) to keep the system awake. Enable **Allow Display Sleep**; to keep working with the lid closed, disable **Allow system sleep when display is closed**. Preventing system sleep increases power use and heat, so connect power and ensure ventilation for extended sessions. Amphetamine is an optional power-management aid, not a replacement for Tailscale or Codex Pocket's security controls.
+
 ## Install
 
 ```sh

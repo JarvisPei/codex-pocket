@@ -1115,6 +1115,8 @@ class BridgeApiTest(unittest.TestCase):
         self.assertIn(b"openThread", source)
         self.assertIn(b"PROJECT_THREAD_PREVIEW_LIMIT", source)
         self.assertIn(b"drawerFocusThreads", source)
+        self.assertIn(b"applyThreadReadReceipts", source)
+        self.assertIn(b"codexPocketUnreadBaselineV2", source)
         self.assertIn(b"Show more", source)
 
     def test_attachment_upload_requires_a_paired_device(self):
