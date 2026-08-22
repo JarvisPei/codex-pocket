@@ -126,6 +126,7 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 - Each paired browser receives a separate random credential; the Mac stores only its SHA-256 digest.
 - The Keychain master credential never leaves the Mac.
 - Desktop send verifies the exact thread id, task title, empty composer, and unique Send control.
+- The Accessibility Helper recognizes English, Simplified Chinese, and Traditional Chinese Send/Stop control labels.
 - Attachments are isolated per paired device, stored in a mode-`0700` upload directory, expire after one hour, and are rejected by the Helper if their path leaves that directory.
 - Stop requires explicit confirmation, an ID-based Desktop task switch, an exact title check, and a unique semantic Stop control.
 - Logs contain metadata only, not Authorization values or full prompt bodies.

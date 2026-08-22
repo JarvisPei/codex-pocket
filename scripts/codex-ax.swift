@@ -151,7 +151,22 @@ func enableElectronAccessibility() -> Bool {
     )
     return manualResult == .success || enhancedResult == .success
 }
-let stopTerms = [
+// Composer actions are intentionally matched against an exact allowlist. Codex
+// localizes the button accessibility label with its UI language, so relying on
+// only the English labels makes Desktop dispatch fail on Chinese installations.
+// Keep this list narrow: these values are allowed to trigger a real click.
+let composerSendTerms: Set<String> = [
+    "send", "send message",
+    "发送", "发送消息",
+    "傳送", "傳送訊息",
+]
+let composerStopTerms: Set<String> = [
+    "stop", "停止",
+]
+
+// Broader terms are only used by the diagnostic tree walker and never authorize
+// a click.
+let stopDiagnosticTerms = [
     "stop", "cancel", "interrupt", "abort",
     "停止", "中止", "取消", "打断",
 ]
@@ -255,8 +270,10 @@ func scanBottomOfWindows(performStop: Bool, checkStop: Bool) {
                             let isExactStop =
                                 role == kAXButtonRole as String &&
                                 fields.contains(where: {
-                                    $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                                        .lowercased() == "stop"
+                                    composerStopTerms.contains(
+                                        $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                                            .lowercased()
+                                    )
                                 }) &&
                                 actionNames.contains(kAXPressAction as String)
                             if isExactStop {
@@ -491,10 +508,10 @@ func composerCandidates() -> ComposerCandidates {
                     } else if role == kAXButtonRole as String,
                               actionNames.contains(kAXPressAction as String)
                     {
-                        if exactSemanticMatch(hit, terms: ["send"]) {
+                        if exactSemanticMatch(hit, terms: composerSendTerms) {
                             result.sendButtons.append(hit)
                         }
-                        if exactSemanticMatch(hit, terms: ["stop"]) {
+                        if exactSemanticMatch(hit, terms: composerStopTerms) {
                             result.stopButtons.append(hit)
                         }
                     }
@@ -1664,7 +1681,7 @@ func walk(_ element: AXUIElement, depth: Int, path: String) {
         role == kAXButtonRole as String ||
         role == "AXLink" ||
         actionNames.contains(kAXPressAction as String)
-    let isStopCandidate = stopTerms.contains(where: { haystack.contains($0) })
+    let isStopCandidate = stopDiagnosticTerms.contains(where: { haystack.contains($0) })
 
     if isStopCandidate || (options.showAllInteractive && isInteractive) {
         matches += 1

@@ -142,6 +142,7 @@ python3 scripts/manage-bridge-devices.py revoke <device-id>
 - 每个配对浏览器拥有独立随机凭据；Mac 只保存其 SHA-256 摘要。
 - Keychain 主凭据不会发送到浏览器设备。
 - Desktop 发送前验证精确任务 ID、任务标题、空输入框和唯一 Send 控件。
+- Accessibility Helper 支持英文、简体中文和繁体中文的 Send/Stop 控件标签。
 - 附件按配对设备隔离，只写入权限为 `0700` 的专用目录；一小时过期，Helper 拒绝目录外路径。
 - Stop 必须经过显式确认，并且只能按下唯一语义 Stop 控件。
 - 日志只记录元数据，不记录 Authorization 或完整指令正文。
