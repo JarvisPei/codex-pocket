@@ -260,7 +260,7 @@ class AccessibilityHelperSourceTest(unittest.TestCase):
 
 class CodexAppServerManagedTurnTest(unittest.TestCase):
     def setUp(self):
-        self.client = CodexAppServerClient(Path("/private/tmp/fake-codex"))
+        self.client = CodexAppServerClient(Path("/private/tmp/fake-codex"), dedicated=True)
         self.requests = []
 
         def fake_request(method, params, timeout=15):

@@ -901,6 +901,9 @@ function renderModelSettingsButton() {
   elements.modelSettingsLabel.textContent = (
     `${fast}${shortModelName(model.displayName, model.id)} ${effortLabel(settings.effort)}`
   );
+  elements.modelSettingsButton.title = settings.source === "defaults"
+    ? "未读到任务保存的模型设置，显示当前默认配置"
+    : "已保存的模型设置；Fast 显示本次 Bridge 选择或默认服务档位";
 }
 
 async function refreshModelSettings(threadId, force = false) {

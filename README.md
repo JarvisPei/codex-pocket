@@ -13,7 +13,7 @@ Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve
 - 在 Project 或 Recents 中新建任务，并交给 Desktop 执行第一条指令。
 - 查看最近历史、最终回复及按原位置穿插的 `Working` / `Worked` 活动摘要。
 - 从手机向已有 Desktop 任务发送后续指令。
-- Mac 明确处于锁屏状态时，纯文本新任务和后续指令可由已连接的 app-server 在后台运行，并继续写入 Desktop 历史。
+- Mac 明确处于锁屏状态时，纯文本新任务和后续指令可由独立的 app-server 在后台运行，并继续写入 Desktop 历史。
 - 从手机附加文件或图片；每条最多 4 个、单个最多 20 MB。
 - 查看运行、暂停、完成状态，并按任务 ID 切换后安全停止任意运行中的 Desktop 任务。
 - 修改任务的模型、推理等级和 Fast 服务档位。
@@ -48,6 +48,8 @@ Codex Pocket Bridge
 ```
 
 Bridge 始终只监听 loopback。Codex app-server 的原始传输、ChatGPT 登录信息和 macOS 通用输入控制均不会暴露到网络。
+
+浏览历史和读取模型设置不会接管任务。新建任务、修改设置使用短生命周期后台；锁屏运行的每个任务使用独立后台，确认该轮结束后释放占用，避免手机端持续持有写入锁而让 Desktop 提示“在另一个应用中打开”。
 
 ## 环境要求
 

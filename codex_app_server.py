@@ -7,9 +7,11 @@ import os
 import queue
 import re
 import secrets
+import sqlite3
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Optional
 
@@ -28,6 +30,10 @@ class AppServerError(RuntimeError):
     pass
 
 
+class AppServerRejected(AppServerError):
+    """A definite RPC rejection, unlike a transport failure/unknown outcome."""
+
+
 class ManagedTurnConflict(AppServerError):
     pass
 
@@ -37,19 +43,28 @@ class ManagedRequestError(AppServerError):
 
 
 class CodexAppServerClient:
-    def __init__(self, codex_binary: Path) -> None:
+    def __init__(self, codex_binary: Path, *, dedicated: bool = False) -> None:
         self.codex_binary = codex_binary
         self._process: Optional[subprocess.Popen[str]] = None
         self._reader: Optional[threading.Thread] = None
         self._pending: dict[int, queue.Queue[dict[str, Any]]] = {}
         self._pending_lock = threading.Lock()
         self._write_lock = threading.Lock()
+        self._close_lock = threading.Lock()
         self._managed_lock = threading.Lock()
         self._settings_lock = threading.RLock()
         self._managed_runs: dict[str, dict[str, Any]] = {}
         self._server_requests: dict[str, dict[str, Any]] = {}
         self._next_id = 1
         self._closed = False
+        # The catalog/reader connection must never become a thread writer.
+        # Each background run owns a separate process, so releasing one thread
+        # cannot cancel another thread (unsubscribe alone has an idle grace).
+        self._dedicated = dedicated
+        self._background_clients: dict[str, CodexAppServerClient] = {}
+        self._settings_overrides: dict[str, dict[str, Any]] = {}
+        self._retire_when_idle = False
+        self._retirement: Optional[threading.Thread] = None
 
     def start(self) -> None:
         if self._process is not None:
@@ -115,6 +130,14 @@ class CodexAppServerClient:
             if response_queue is not None:
                 response_queue.put(message)
         self._fail_pending("Codex app-server connection closed.")
+        if not self._closed:
+            with self._managed_lock:
+                for run in self._managed_runs.values():
+                    if self._is_active_status(run.get("status")):
+                        run["status"] = "failed"
+                        run["error"] = "Codex app-server connection closed."
+                        run["pendingRequest"] = None
+                        self._touch_run(run)
 
     @staticmethod
     def _is_active_status(status: Any) -> bool:
@@ -192,6 +215,32 @@ class CodexAppServerClient:
             else:
                 return
             self._touch_run(run)
+        if method == "turn/completed" and self._retire_when_idle:
+            # Never wait for an RPC or process exit on the stdout reader.
+            self._retirement = threading.Thread(
+                target=self._close_finished_run,
+                args=(thread_id,),
+                name="codex-writer-release",
+                daemon=True,
+            )
+            self._retirement.start()
+
+    def _close_finished_run(self, thread_id: str) -> None:
+        # A completion may arrive before the turn/start response. Let that
+        # request finish before disconnecting its transport.
+        with self._settings_lock:
+            run = self.managed_run(thread_id)
+            if run and not self._is_active_status(run.get("status")):
+                self.close()
+
+    @contextmanager
+    def _temporary_writer(self):
+        writer = CodexAppServerClient(self.codex_binary, dedicated=True)
+        try:
+            writer.start()
+            yield writer
+        finally:
+            writer.close()
 
     def _safe_server_request(
         self,
@@ -310,7 +359,10 @@ class CodexAppServerClient:
         with self._pending_lock:
             pending = list(self._pending.values())
         for response_queue in pending:
-            response_queue.put({"error": {"message": message}})
+            try:
+                response_queue.put_nowait({"transportError": message})
+            except queue.Full:
+                pass  # A valid RPC response is already waiting for its caller.
 
     def _write(self, message: dict[str, Any]) -> None:
         process = self._process
@@ -359,7 +411,9 @@ class CodexAppServerClient:
                 if isinstance(error_payload, dict)
                 else "request failed"
             )
-            raise AppServerError(f"Codex app-server rejected {method}: {detail}")
+            raise AppServerRejected(f"Codex app-server rejected {method}: {detail}")
+        if "transportError" in response:
+            raise AppServerError(str(response["transportError"]))
         result = response.get("result")
         if not isinstance(result, dict):
             raise AppServerError(f"Codex app-server returned invalid data for {method}.")
@@ -405,13 +459,45 @@ class CodexAppServerClient:
         }
 
     def read_thread_settings(self, thread_id: str) -> dict[str, Any]:
+        # thread/resume takes a writer lock, even without turn/start. Merely
+        # displaying the model picker must not prevent Desktop opening a task.
+        result = self.request(
+            "thread/read", {"threadId": thread_id, "includeTurns": False}, timeout=25,
+        )
+        thread = result.get("thread")
+        if not isinstance(thread, dict) or thread.get("id") != thread_id:
+            raise AppServerError("Invalid thread metadata.")
+        config_result = self.request(
+            "config/read", {"includeLayers": False, "cwd": thread.get("cwd")},
+        )
+        config = config_result.get("config")
+        if not isinstance(config, dict):
+            raise AppServerError("Invalid model configuration.")
+        saved = _read_saved_model_settings(thread_id)
+        settings: dict[str, Any] = {
+            "model": saved.get("model") or config.get("model") or "",
+            "effort": saved.get("effort") or config.get("model_reasoning_effort") or "",
+            # Codex does not persist the service tier with thread metadata.
+            "serviceTier": config.get("service_tier"),
+            "source": "saved" if saved else "defaults",
+        }
+        if not settings["model"] or not settings["effort"]:
+            models = self.list_models().get("data", [])
+            model = next((item for item in models if isinstance(item, dict) and (
+                item.get("model") == settings["model"] if settings["model"] else item.get("isDefault")
+            )), {})
+            settings["model"] = settings["model"] or model.get("model", "")
+            settings["effort"] = settings["effort"] or model.get("defaultReasoningEffort", "")
         with self._settings_lock:
-            result = self.request(
-                "thread/resume",
-                {"threadId": thread_id},
-                timeout=30,
-            )
-            return self._thread_settings_from_resume(result)
+            override = self._settings_overrides.get(thread_id)
+            if override:
+                if (settings["model"], settings["effort"]) == (
+                    override["model"], override["effort"],
+                ):
+                    settings["serviceTier"] = override["serviceTier"]
+                else:
+                    self._settings_overrides.pop(thread_id, None)
+        return settings
 
     def _validate_thread_settings(
         self,
@@ -457,6 +543,16 @@ class CodexAppServerClient:
         service_tier: Optional[str],
     ) -> dict[str, Any]:
         with self._settings_lock:
+            if not self._dedicated:
+                run = self.managed_run(thread_id)
+                if run and self._is_active_status(run.get("status")):
+                    raise ManagedTurnConflict("A managed turn is already active.")
+                with self._temporary_writer() as writer:
+                    settings = writer.update_thread_settings(
+                        thread_id, model=model, effort=effort, service_tier=service_tier,
+                    )
+                self._settings_overrides[thread_id] = dict(settings)
+                return settings
             self._validate_thread_settings(model, effort, service_tier)
 
             # Settings updates only address threads loaded into this app-server.
@@ -491,6 +587,16 @@ class CodexAppServerClient:
         service_tier: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create an idle persisted thread for Codex Desktop to take over."""
+        if not self._dedicated:
+            with self._temporary_writer() as writer:
+                result = writer.create_thread(
+                    title=title, cwd=cwd, model=model, effort=effort,
+                    service_tier=service_tier,
+                )
+            if model and effort:
+                with self._settings_lock:
+                    self._settings_overrides[result["thread"]["id"]] = dict(result["settings"])
+            return result
         params: dict[str, Any] = {"ephemeral": False}
         if cwd:
             params["cwd"] = cwd
@@ -513,6 +619,10 @@ class CodexAppServerClient:
                 {"threadId": thread_id, "name": title},
                 timeout=30,
             )
+            # On current Codex, thread/start + name/set may still be only in
+            # memory. Resuming our own new thread materializes its rollout,
+            # before the short-lived writer exits and Desktop takes ownership.
+            self.request("thread/resume", {"threadId": thread_id}, timeout=30)
             settings = self._thread_settings_from_resume(result)
             if model and effort:
                 settings = self.update_thread_settings(
@@ -563,6 +673,40 @@ class CodexAppServerClient:
         user_text: str,
         resume: bool,
     ) -> dict[str, Any]:
+        with self._settings_lock:
+            if not self._dedicated:
+                previous = self._background_clients.get(thread_id)
+                if previous:
+                    run = previous.managed_run(thread_id)
+                    if run and self._is_active_status(run.get("status")):
+                        raise ManagedTurnConflict("A managed turn is already active.")
+                    previous.close()
+                writer = CodexAppServerClient(self.codex_binary, dedicated=True)
+                writer._retire_when_idle = True
+                writer._settings_overrides[thread_id] = dict(
+                    self._settings_overrides.get(thread_id, {}),
+                )
+                self._background_clients[thread_id] = writer
+                try:
+                    writer.start()
+                    # New process: it must resume even if the caller just
+                    # created the task on a different, now released writer.
+                    return writer._start_turn(
+                        thread_id, input_items=input_items, user_text=user_text, resume=True,
+                    )
+                except Exception:
+                    run = writer.managed_run(thread_id)
+                    if not run or not self._is_active_status(run.get("status")):
+                        writer.close()
+                    raise
+            return self._start_dedicated_turn(
+                thread_id, input_items=input_items, user_text=user_text, resume=resume,
+            )
+
+    def _start_dedicated_turn(
+        self, thread_id: str, *, input_items: list[dict[str, Any]],
+        user_text: str, resume: bool,
+    ) -> dict[str, Any]:
         with self._managed_lock:
             existing = self._managed_runs.get(thread_id)
             if existing is not None and self._is_active_status(existing.get("status")):
@@ -581,14 +725,17 @@ class CodexAppServerClient:
                 "updatedAt": time.time(),
             }
             self._managed_runs[thread_id] = run
+        turn_requested = False
         try:
             if resume:
                 self.request("thread/resume", {"threadId": thread_id}, timeout=30)
+            turn_requested = True
             result = self.request(
                 "turn/start",
                 {
                     "threadId": thread_id,
                     "input": input_items,
+                    **self._settings_overrides.get(thread_id, {}),
                 },
                 timeout=30,
             )
@@ -601,11 +748,17 @@ class CodexAppServerClient:
                 if run.get("status") == "starting":
                     run["status"] = str(turn.get("status", "inProgress"))
                 self._touch_run(run)
-                return self._managed_run_snapshot(run)
+                snapshot = self._managed_run_snapshot(run)
+            if self._retire_when_idle and not self._is_active_status(snapshot["status"]):
+                self.close()
+            return snapshot
         except Exception as error:
             with self._managed_lock:
                 run = self._managed_runs[thread_id]
-                run["status"] = "failed"
+                # A lost turn/start response is not proof that no task began.
+                # Keep its writer alive for subsequent notifications/approval.
+                if not turn_requested or isinstance(error, AppServerRejected):
+                    run["status"] = "failed"
                 run["error"] = _bounded_text(str(error), 2_000)
                 self._touch_run(run)
             raise
@@ -615,11 +768,17 @@ class CodexAppServerClient:
         return json.loads(json.dumps(run, ensure_ascii=False))
 
     def managed_run(self, thread_id: str) -> Optional[dict[str, Any]]:
+        writer = self._background_clients.get(thread_id)
+        if writer is not None:
+            return writer.managed_run(thread_id)
         with self._managed_lock:
             run = self._managed_runs.get(thread_id)
             return self._managed_run_snapshot(run) if run is not None else None
 
     def interrupt_turn(self, thread_id: str) -> dict[str, Any]:
+        writer = self._background_clients.get(thread_id)
+        if writer is not None:
+            return writer.interrupt_turn(thread_id)
         with self._managed_lock:
             run = self._managed_runs.get(thread_id)
             if run is None or not self._is_active_status(run.get("status")):
@@ -648,6 +807,9 @@ class CodexAppServerClient:
         request_key: str,
         payload: dict[str, Any],
     ) -> dict[str, Any]:
+        writer = self._background_clients.get(thread_id)
+        if writer is not None:
+            return writer.respond_to_request(thread_id, request_key, payload)
         with self._managed_lock:
             pending = self._server_requests.get(request_key)
             if pending is None or pending.get("threadId") != thread_id:
@@ -707,6 +869,12 @@ class CodexAppServerClient:
         return {}
 
     def close(self) -> None:
+        with self._close_lock:
+            self._close_process()
+
+    def _close_process(self) -> None:
+        for writer in list(self._background_clients.values()):
+            writer.close()
         self._closed = True
         process = self._process
         if process is None:
@@ -725,7 +893,42 @@ class CodexAppServerClient:
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=2)
+        if self._reader is not None and self._reader is not threading.current_thread():
+            self._reader.join(timeout=2)
+        if process.stdout is not None:
+            process.stdout.close()
         self._process = None
+
+
+def _read_saved_model_settings(thread_id: str) -> dict[str, str]:
+    """Read persisted model/effort without acquiring a task writer lock.
+
+    SQLite is an optional, versioned local metadata source. Older schemas and
+    unavailable stores fall back to effective config, never to thread/resume.
+    """
+    root = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+    databases = sorted(
+        (path for path in root.glob("state_*.sqlite")
+         if re.fullmatch(r"state_\d+\.sqlite", path.name)),
+        key=lambda path: int(path.stem.split("_")[1]), reverse=True,
+    )
+    if not databases:
+        return {}
+    connection = None
+    try:
+        connection = sqlite3.connect(databases[0].as_uri() + "?mode=ro", timeout=1)
+        row = connection.execute(
+            "SELECT model, reasoning_effort FROM threads WHERE id = ?", (thread_id,),
+        ).fetchone()
+        if row:
+            return {key: value for key, value in zip(("model", "effort"), row)
+                    if isinstance(value, str) and value}
+    except (OSError, sqlite3.Error, ValueError):
+        pass
+    finally:
+        if connection is not None:
+            connection.close()
+    return {}
 
 
 def _bounded_text(value: Any, limit: int) -> str:

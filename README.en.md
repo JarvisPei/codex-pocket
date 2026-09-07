@@ -13,7 +13,7 @@ Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own ta
 - Create a task inside a Project or Recents and hand its first instruction to Desktop.
 - Read recent messages, final answers, and position-preserving `Working` / `Worked` activity summaries.
 - Send follow-up instructions to existing Desktop tasks.
-- When macOS is definitely locked, start text-only tasks and follow-ups through the already-connected app-server while preserving them in Desktop history.
+- When macOS is definitely locked, start text-only tasks and follow-ups through isolated app-server processes while preserving them in Desktop history.
 - Attach files or images from mobile, up to four files and 20 MB per file.
 - Distinguish running, paused, and completed tasks and safely stop any running Desktop turn after an ID-based task switch.
 - Change the task model, reasoning effort, and Fast service tier.
@@ -48,6 +48,8 @@ Codex Pocket Bridge
 ```
 
 The bridge always binds to loopback. It never exposes the raw app-server transport, ChatGPT login data, or general macOS input control to the network.
+
+Browsing history and reading model settings do not take ownership of a task. Task creation and settings changes use short-lived backends; each locked-screen background run has its own backend, released when that turn is confirmed finished. This prevents phone browsing from retaining writer locks that block Desktop with “This is open in another app”.
 
 ## Requirements
 

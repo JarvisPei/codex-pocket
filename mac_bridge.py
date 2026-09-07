@@ -2283,6 +2283,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         {"ok": False, "error": "invalid_model_settings"},
                     )
                     return
+                except ManagedTurnConflict:
+                    self._send_json(
+                        HTTPStatus.CONFLICT,
+                        {"ok": False, "error": "model_settings_locked"},
+                    )
+                    return
                 except AppServerError:
                     self._send_json(
                         HTTPStatus.BAD_GATEWAY,

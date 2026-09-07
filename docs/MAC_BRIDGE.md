@@ -67,7 +67,7 @@ The bridge starts the Codex Desktop bundle's version-matched
 While macOS is unlocked, new phone instructions are deep-linked to the real
 Desktop task and submitted through its semantic Accessibility controls. When
 the console is positively detected as locked, text-only instructions may use
-the already-connected child as a bounded background execution fallback; those
+an isolated per-task child as a bounded background execution fallback; those
 turns remain persisted and visible in Desktop history. Unknown lock state fails
 closed to the normal Desktop path, and attachments require unlocking first.
 Background turns remain persisted in Codex history. A new task is read normally
@@ -102,6 +102,34 @@ stays expanded; completed work collapses without losing the user's manual
 choice. On mobile, a separate touch target on the right provides a draggable
 scroll thumb and track-based page jumps.
 Reading a thread uses `thread/read` and never resumes, starts, or modifies it.
+The model picker is also read-only: it combines effective `config/read` defaults
+with model/effort from the newest local `state_*.sqlite`, opened in read-only
+mode. An unavailable/older metadata schema falls back to defaults, not
+`thread/resume`. This is saved configuration, not a live Desktop composer query.
+Service tier is not persisted in thread metadata; the picker uses the Bridge's
+current selection when available, otherwise the effective default. Background
+turns explicitly carry Bridge-selected settings.
+If Desktop already owns the task's writer lock, settings updates fail safely;
+the Bridge does not force a takeover. Change settings in Desktop in that case.
+
+Creating a task or changing settings uses a short-lived, private app-server.
+New tasks are materialized with a resume before that process exits. The exit
+releases its writer lock before Desktop dispatch; no lock files are deleted.
+Background turns each have their own private app-server, retained for streaming,
+approvals, and Stop until `turn/completed` (including failed/interrupted turns).
+Only that writer exits when its turn ends, preserving other active tasks.
+An ambiguous `turn/start` timeout retains the writer for late events rather
+than cancelling possibly running work. Phone refresh/disconnect does not close
+these writers. Restarting Bridge still interrupts its active background turns.
+See the official [app-server lifecycle API](https://learn.chatgpt.com/docs/app-server#api-overview):
+`thread/unsubscribe` has an inactivity grace period, so it is not an immediate
+writer-lock handoff mechanism.
+
+Lifecycle regressions run with `python3 -m unittest tests.test_app_server_lifecycle`.
+To additionally verify writer handoff against the installed Codex binary, run
+`CODEX_POCKET_TEST_BINARY=/Applications/ChatGPT.app/Contents/Resources/codex python3 -m unittest tests.test_app_server_lifecycle`.
+That opt-in check uses an isolated temporary Codex store, no existing credentials
+or threads, and no model inference.
 History responses use browser-negotiated gzip compression. The mobile page
 initially requests the newest 30 turns, can explicitly load up to 60, renders
 them in one DOM batch, and keeps a small one-minute memory/cache window for
@@ -158,8 +186,8 @@ amendments. Raw reasoning, arbitrary JSON-RPC methods, arbitrary Mac file paths,
 and general shell access remain unavailable.
 
 Desktop owns phone-started work while the console is unlocked. A positively
-detected lock permits text-only turns to run through the bridge's existing
-app-server connection; the same connection supplies their live status, Stop,
+detected lock permits text-only turns to run through a dedicated private
+app-server connection; that connection supplies its live status, Stop,
 and bounded interaction requests. Accessibility remains the authority for
 foreground Desktop running/stop state, and the two paths reject ambiguous or
 concurrent ownership.
