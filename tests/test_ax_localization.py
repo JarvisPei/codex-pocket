@@ -41,6 +41,39 @@ class AccessibilityLocalizationTest(unittest.TestCase):
         )
         self.assertIn("composerStopTerms.contains(", SOURCE)
 
+    def test_resume_is_separate_from_send_in_each_supported_language(self):
+        resume = string_set("composerResumeTerms")
+        self.assertGreaterEqual(
+            resume, {"resume", "continue", "继续", "恢复", "繼續", "恢復"}
+        )
+        self.assertFalse(resume & string_set("composerSendTerms"))
+        self.assertIn("exactSemanticMatch(hit, terms: composerResumeTerms)", SOURCE)
+
+    def test_continue_has_single_guarded_native_invocation_and_own_receipt(self):
+        start = SOURCE.index("    if payload.continueOnly {")
+        end = SOURCE.index("    if !payload.continueOnly {", start)
+        resume = SOURCE[start:end]
+        for guard in (
+            "titles.count == 1, titles[0] == expectedTitle",
+            "candidates.textAreas.count == 1",
+            "composerIsEmpty(candidates.textAreas[0])",
+            "candidates.stopButtons.isEmpty",
+            "candidates.sendButtons.isEmpty",
+            "candidates.resumeButtons.count == 1",
+            "kAXEnabledAttribute as CFString) as? Bool) == true",
+        ):
+            self.assertIn(guard, resume)
+        self.assertEqual(resume.count("AXUIElementPerformAction("), 1)
+        self.assertNotIn("clickElementCenter", resume)
+        self.assertNotIn("postUnicodeText", resume)
+        self.assertNotIn("kAXValueAttribute", resume)
+        self.assertLess(resume.index("AXUIElementPerformAction("), resume.index("for _ in 0..<60"))
+        self.assertIn("latest.resumeButtons.isEmpty", resume)
+        self.assertIn("latest.stopButtons.count == 1", resume)
+        self.assertIn("if running || finished", resume)
+        self.assertIn('"mode": "continue"', resume)
+        self.assertIn("not retrying.", resume)
+
 
 if __name__ == "__main__":
     unittest.main()

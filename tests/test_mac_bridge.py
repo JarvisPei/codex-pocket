@@ -2231,6 +2231,31 @@ class DesktopControllerCommandTest(unittest.TestCase):
         )
 
     @patch("mac_bridge.subprocess.run")
+    def test_native_continue_passes_empty_input_and_never_retries_uncertain_click(self, run):
+        run.return_value = type(
+            "Result",
+            (),
+            {"returncode": 34, "stdout": "", "stderr": "Resume acknowledgement uncertain"},
+        )()
+        controller = DesktopController(
+            Path("/repo/scripts/codex-ax.swift"),
+            ax_helper=Path("/Applications/MobileCodexBridgeHelper/mobile-codex-ax"),
+        )
+        with self.assertRaises(DesktopDispatchError) as raised:
+            controller.send_to_desktop(
+                "019fb6fd-68d6-71f1-8d60-ea75a658d0ab",
+                "测试任务",
+                "",
+                continue_only=True,
+            )
+        self.assertEqual(raised.exception.reason, "desktop_send_unconfirmed")
+        self.assertEqual(run.call_count, 1)
+        payload = json.loads(run.call_args.kwargs["input"])
+        self.assertTrue(payload["continueOnly"])
+        self.assertEqual(payload["message"], "")
+        self.assertEqual(payload["attachmentPaths"], [])
+
+    @patch("mac_bridge.subprocess.run")
     def test_desktop_send_maps_active_turn_conflict(self, run):
         run.return_value = type(
             "Result",

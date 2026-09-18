@@ -70,6 +70,7 @@ struct DesktopRequestCandidate {
 struct ComposerCandidates {
     var textAreas: [AXUIElement] = []
     var sendButtons: [AXUIElement] = []
+    var resumeButtons: [AXUIElement] = []
     var stopButtons: [AXUIElement] = []
 }
 
@@ -162,6 +163,11 @@ let composerSendTerms: Set<String> = [
 ]
 let composerStopTerms: Set<String> = [
     "stop", "停止",
+]
+let composerResumeTerms: Set<String> = [
+    "resume", "continue", "resume task", "continue task",
+    "继续", "恢复", "继续任务", "恢复任务",
+    "繼續", "恢復", "繼續任務", "恢復任務",
 ]
 
 // Broader terms are only used by the diagnostic tree walker and never authorize
@@ -510,6 +516,9 @@ func composerCandidates() -> ComposerCandidates {
                     {
                         if exactSemanticMatch(hit, terms: composerSendTerms) {
                             result.sendButtons.append(hit)
+                        }
+                        if exactSemanticMatch(hit, terms: composerResumeTerms) {
+                            result.resumeButtons.append(hit)
                         }
                         if exactSemanticMatch(hit, terms: composerStopTerms) {
                             result.stopButtons.append(hit)
@@ -1389,6 +1398,55 @@ func performDesktopSend() {
     let reuseMatchingDraft = !payload.continueOnly && existingText == message
     guard existingText.isEmpty || reuseMatchingDraft else {
         failDesktopSend("The Codex composer already contains a different draft.", code: 29)
+    }
+
+    if payload.continueOnly {
+        // Resume is a distinct native action, not an empty Send. Refresh all
+        // guards immediately before a single semantic invocation; never retry
+        // a possibly delivered Resume or treat an already-empty draft as proof.
+        candidates = composerCandidates()
+        let titles = currentTaskTitles()
+        guard titles.count == 1, titles[0] == expectedTitle else {
+            failDesktopSend("Codex task identity changed before resuming.", code: 32)
+        }
+        guard candidates.textAreas.count == 1,
+              composerIsEmpty(candidates.textAreas[0]) else {
+            failDesktopSend("Codex Resume requires an empty composer.", code: 29)
+        }
+        guard candidates.stopButtons.isEmpty,
+              candidates.sendButtons.isEmpty,
+              candidates.resumeButtons.count == 1,
+              (attribute(candidates.resumeButtons[0], kAXEnabledAttribute as CFString) as? Bool) == true
+        else {
+            failDesktopSend("Expected one enabled semantic Resume button.", code: 31)
+        }
+        let pressResult = AXUIElementPerformAction(
+            candidates.resumeButtons[0], kAXPressAction as CFString
+        )
+        guard pressResult == .success else {
+            failDesktopSend("Unable to activate Codex Resume; not retrying.", code: 33)
+        }
+        for _ in 0..<60 {
+            Thread.sleep(forTimeInterval: 0.1)
+            let latestTitles = currentTaskTitles()
+            guard latestTitles.count == 1, latestTitles[0] == expectedTitle else { continue }
+            let latest = composerCandidates()
+            let running = latest.stopButtons.count == 1
+            let finished = latest.resumeButtons.isEmpty &&
+                latest.textAreas.count == 1 && composerIsEmpty(latest.textAreas[0]) &&
+                latest.sendButtons.count == 1 &&
+                (attribute(latest.sendButtons[0], kAXEnabledAttribute as CFString) as? Bool) == false
+            if running || finished {
+                let output: [String: Any] = [
+                    "ok": true, "taskTitle": expectedTitle,
+                    "stopCandidates": latest.stopButtons.count, "mode": "continue",
+                ]
+                let data = try! JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
+                print(String(decoding: data, as: UTF8.self))
+                return
+            }
+        }
+        failDesktopSend("Codex Resume acknowledgement is uncertain; not retrying.", code: 34)
     }
 
     if !payload.continueOnly {
