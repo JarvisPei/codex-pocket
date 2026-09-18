@@ -15,6 +15,10 @@ launch_agents_dir="${user_home_path}/Library/LaunchAgents"
 user_log_dir="${user_home_path}/Library/Logs"
 user_apps_dir="${user_home_path}/Applications"
 agent_path="${launch_agents_dir}/${agent_label}.plist"
+first_install=false
+if [[ ! -e "${agent_path}" && ! -e "${user_home_path}/Library/Application Support/MobileCodexBridge/devices.json" ]]; then
+  first_install=true
+fi
 template_path="${repo_root}/launchd/${agent_label}.plist"
 launch_domain="gui/${current_uid}"
 helper_app="${user_apps_dir}/MobileCodexBridgeHelper.app"
@@ -111,3 +115,8 @@ fi
 /bin/launchctl enable "${launch_domain}/${agent_label}"
 
 echo "Installed and started ${agent_label}"
+if [[ "${first_install}" == true ]]; then
+  # This hook runs only in the installer, never from launchd on daily startup.
+  /usr/bin/python3 "${repo_root}/scripts/pair-device.py" --launch || \
+    echo "Bridge is installed. Open pairing manually: python3 scripts/pair-device.py"
+fi

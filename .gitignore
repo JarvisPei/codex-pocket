@@ -1,5 +1,9 @@
 # Local upstream checkout
 vendor/
+!vendor/
+vendor/*
+!vendor/qrcodegen.py
+!vendor/README.md
 
 # Python cache
 __pycache__/

@@ -103,15 +103,21 @@ After installation, open the drawer through the existing Tailscale URL and tap `
 
 ## Pair a browser device
 
-Generate a five-minute, single-use QR code on the Mac:
+On a fresh Mac installation, the installer opens the pairing page once Bridge is ready. It shows a QR code if private Tailscale Serve is configured; otherwise it shows setup instructions and a retry button. Updates, everyday startup, and computer restarts do not reopen it. Failure to open the browser does not stop Bridge.
+
+For another device, keep Bridge and Tailscale Serve running and run `python3 scripts/pair-device.py` from the repository directory. It detects the private HTTPS root proxy to this Bridge. You can also specify an address (replace the example with the HTTPS address from `tailscale serve status`):
 
 ```sh
-swift scripts/create-pairing-qr.swift \
-  https://your-mac.your-tailnet.ts.net/ \
-  /private/tmp/codex-pocket-pairing.png
+python3 scripts/pair-device.py --url https://your-mac.your-tailnet.ts.net
 ```
 
-Scan it on the target device. The device credential is stored in that browser's `localStorage`, so closing the tab or restarting the device does not require pairing again. Treat the QR image as a temporary secret and delete it after pairing.
+1. The computer shows a QR code with a five-minute countdown. Regenerating invalidates the previous code.
+2. Scan on the phone, check the computer address, and choose **Confirm pairing** (currently labeled “确认配对”). Opening the link alone does not consume the ticket.
+3. If scanning is unavailable, expand the manual section, open the listed address on the phone, and paste the pairing code.
+
+The device credential stays in that browser's `localStorage`; closing a tab or restarting the device does not require pairing again. Clearing site data, changing browsers, or using another origin does. Keep QR codes and pairing codes private. The local page never receives the master credential. Closing it does not stop Bridge or Codex; its local server exits after 30 minutes or Ctrl+C. This command does not install or start Bridge.
+
+If the page requests a Bridge update, restart the **Bridge service**, not Codex Desktop. Existing paired devices remain trusted. The legacy `scripts/create-pairing-qr.swift` image generator remains available.
 
 List or revoke paired devices:
 

@@ -75,6 +75,8 @@ zsh scripts/install-mac-bridge-launch-agent.sh
 - 构建 `~/Applications/MobileCodexBridgeHelper.app`；
 - 让服务监听 `127.0.0.1:4317`。
 
+首次安装成功、Bridge 就绪后，会自动在电脑浏览器打开配对页面。已配置 Tailscale Serve 时直接显示二维码；尚未配置时，页面会提示下一步，配置完成后点击“已配置，重新检测”。更新安装、日常启动和重启电脑不会重复弹出。自动打开失败不影响服务，可手动运行 `python3 scripts/pair-device.py`。
+
 首次安装后，在“系统设置 → 隐私与安全性 → 辅助功能”中允许 `Mobile Codex Bridge Helper`。底层 Bundle、LaunchAgent 和 Keychain 标识暂时保留旧的 `mobile-codex-bridge` 名称，以兼容已经授权的安装。
 
 本机检查：
@@ -119,15 +121,19 @@ zsh scripts/install-local-hotspot-proxy.sh [port]
 
 ## 配对浏览器设备
 
-在 Mac 上生成五分钟有效、只能使用一次的二维码：
+首次安装会自动打开配对页面。以后添加设备时，先保持 Bridge 和 Tailscale Serve 运行，在项目目录执行 `python3 scripts/pair-device.py`，即可检测指向本机 Bridge 的私有 HTTPS 入口并打开页面。也可明确指定地址（将地址替换为 `tailscale serve status` 显示的 HTTPS 地址）：
 
 ```sh
-swift scripts/create-pairing-qr.swift \
-  https://your-mac.your-tailnet.ts.net/ \
-  /private/tmp/codex-pocket-pairing.png
+python3 scripts/pair-device.py --url https://your-mac.your-tailnet.ts.net
 ```
 
-用目标设备扫描并完成配对。设备凭据保存在该浏览器的 `localStorage`，关闭标签页或重启设备不会要求重新配对。二维码属于临时秘密，配对完成后应删除。
+1. 电脑页面显示二维码和五分钟倒计时；过期后点击“重新生成二维码”。重新生成会让旧码失效。
+2. 手机扫描，在浏览器核对电脑地址，然后点击“确认配对”。仅打开链接不会消耗配对码。
+3. 不方便扫码时，展开“手动输入配对码”，在手机打开所列地址并粘贴配对码。
+
+设备凭据保存在该浏览器的 `localStorage`，关闭标签页或重启设备无需重新配对；清除网站数据、更换浏览器或访问另一个地址则需要重新配对。二维码和配对码是临时秘密，请勿公开。本机配对页面不会提供主凭据，关闭它不会停止 Bridge 或 Codex；该页面服务最多运行 30 分钟，终端中可按 Ctrl+C 退出。本功能不负责安装或启动 Bridge。
+
+如果提示需要更新 Bridge，请重启 **Bridge 服务**以加载新版本，不需要重启 Codex Desktop。原有已配对设备不受影响。旧的 `scripts/create-pairing-qr.swift` 图片生成脚本仍可使用。
 
 查看或撤销设备：
 

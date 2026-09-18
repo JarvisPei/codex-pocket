@@ -143,6 +143,8 @@ if (window.location.hash) {
 let deviceToken = localStorage.getItem(DEVICE_TOKEN_KEY) || "";
 let legacyToken = sessionStorage.getItem(LEGACY_TOKEN_KEY) || "";
 let pairingTicket = sessionStorage.getItem(PAIRING_TICKET_KEY) || "";
+let pairingConfirmed = false;
+let pairingDialogDismissed = false;
 let currentTaskTitle = "";
 let currentStopCandidates = 0;
 let desktopStatusKnown = false;
@@ -948,7 +950,13 @@ async function refreshModelSettings(threadId, force = false) {
 }
 
 function showTokenDialog(message = "") {
-  elements.tokenInput.value = "";
+  if (elements.tokenDialog.open) {
+    if (message) elements.tokenError.textContent = message;
+    return;
+  }
+  if (pairingDialogDismissed && !message) return;
+  elements.tokenInput.value = pairingTicket || legacyToken || "";
+  document.querySelector('#pairingDestination').textContent = `电脑地址：${window.location.host}`;
   elements.tokenError.textContent = message;
   if (!elements.tokenDialog.open) elements.tokenDialog.showModal();
   setTimeout(() => elements.tokenInput.focus(), 0);
@@ -963,8 +971,9 @@ function clearBootstrapCredentials() {
 
 async function enrollDevice() {
   if (deviceToken) return true;
-  if (enrollmentPromise) return enrollmentPromise;
+  if (enrollmentPromise) return enrollmentPromise.catch(() => false);
   if (!legacyToken && !pairingTicket) return false;
+  if (!pairingConfirmed) return false;
 
   enrollmentPromise = (async () => {
     const headers = { "Content-Type": "application/json" };
@@ -978,8 +987,12 @@ async function enrollDevice() {
     });
     const result = await response.json();
     if (!response.ok || !result.device?.deviceToken) {
-      clearBootstrapCredentials();
-      throw new Error("device enrollment failed");
+      const reason = result.pairingStatus;
+      if (response.status === 401) clearBootstrapCredentials();
+      throw new Error(reason === 'used' ? '配对码已被使用，请在电脑上重新生成二维码。' :
+        reason === 'expired' ? '二维码已过期，请在电脑上重新生成。' :
+        response.status === 401 ? '配对码无效，或电脑服务已重启。请重新生成二维码。' :
+        '电脑暂时无法保存配对，请稍后重试。');
     }
     deviceToken = result.device.deviceToken;
     localStorage.setItem(DEVICE_TOKEN_KEY, deviceToken);
@@ -989,7 +1002,12 @@ async function enrollDevice() {
 
   try {
     return await enrollmentPromise;
+  } catch (error) {
+    pairingDialogDismissed = false;
+    showTokenDialog(error instanceof TypeError ? '连接电脑失败，请检查 Tailscale 和电脑服务后重试。' : error.message);
+    return false;
   } finally {
+    pairingConfirmed = false;
     enrollmentPromise = undefined;
   }
 }
@@ -998,7 +1016,7 @@ function handleUnauthorized() {
   deviceToken = "";
   localStorage.removeItem(DEVICE_TOKEN_KEY);
   setDeviceState("error", "设备授权已失效");
-  showTokenDialog("请从 Mac 重新生成一次性配对二维码。");
+  showTokenDialog("请从电脑重新生成一次性配对链接或二维码。");
 }
 
 function formatThreadTime(value) {
@@ -4405,14 +4423,33 @@ elements.tokenButton.addEventListener("click", () => {
       : "",
   );
 });
-elements.tokenCancel.addEventListener("click", () => elements.tokenDialog.close());
+elements.tokenCancel.addEventListener("click", () => {
+  pairingDialogDismissed = true;
+  pairingConfirmed = false;
+  elements.tokenDialog.close();
+});
+elements.tokenDialog.addEventListener('cancel', () => { pairingDialogDismissed = true; pairingConfirmed = false; });
 elements.tokenForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  const supplied = elements.tokenInput.value.trim();
+  let supplied = elements.tokenInput.value.trim();
+  if (supplied.startsWith('https://')) {
+    try {
+      const url = new URL(supplied);
+      if (url.origin !== window.location.origin) throw new Error();
+      supplied = new URLSearchParams(url.hash.slice(1)).get('pairing') || '';
+    } catch {
+      elements.tokenError.textContent = '此配对链接属于另一台电脑，请在对应地址打开。';
+      return;
+    }
+  }
   if (supplied.startsWith("pair1.")) {
+    legacyToken = '';
+    sessionStorage.removeItem(LEGACY_TOKEN_KEY);
     pairingTicket = supplied;
     sessionStorage.setItem(PAIRING_TICKET_KEY, supplied);
   } else if (supplied.length >= 32) {
+    pairingTicket = '';
+    sessionStorage.removeItem(PAIRING_TICKET_KEY);
     legacyToken = supplied;
     sessionStorage.setItem(LEGACY_TOKEN_KEY, supplied);
   } else {
@@ -4420,6 +4457,8 @@ elements.tokenForm.addEventListener("submit", (event) => {
     return;
   }
   deviceToken = "";
+  pairingConfirmed = true;
+  pairingDialogDismissed = false;
   localStorage.removeItem(DEVICE_TOKEN_KEY);
   elements.tokenDialog.close();
   setDeviceState("pending", "正在注册受信任设备…");

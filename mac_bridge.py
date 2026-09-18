@@ -851,6 +851,7 @@ class PairingTicketStore:
     def __init__(self, ttl_seconds: int = PAIRING_TICKET_TTL_SECONDS) -> None:
         self.ttl_seconds = ttl_seconds
         self._tickets: dict[str, float] = {}
+        self._used: set[str] = set()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -864,17 +865,45 @@ class PairingTicketStore:
             self._tickets = {
                 digest: expiry
                 for digest, expiry in self._tickets.items()
-                if expiry > now
+                if expiry + self.ttl_seconds > now
             }
+            self._used.intersection_update(self._tickets)
+            if len(self._tickets) >= 1024:
+                oldest = min(self._tickets, key=self._tickets.get)
+                self._tickets.pop(oldest)
+                self._used.discard(oldest)
             self._tickets[self._digest(ticket)] = now + self.ttl_seconds
         return ticket
 
     def consume(self, ticket: str) -> bool:
-        now = time.monotonic()
+        return self.consume_status(ticket) == "valid"
+
+    def _status_unlocked(self, ticket: str) -> str:
         digest = self._digest(ticket)
+        expiry = self._tickets.get(digest)
+        if expiry is None:
+            return "invalid"
+        if digest in self._used:
+            return "used"
+        return "valid" if expiry > time.monotonic() else "expired"
+
+    def status(self, ticket: str) -> dict:
         with self._lock:
-            expiry = self._tickets.pop(digest, None)
-            return expiry is not None and expiry > now
+            return {"status": self._status_unlocked(ticket), "expiresIn": max(0, int(
+                self._tickets.get(self._digest(ticket), 0) - time.monotonic()))}
+
+    def revoke(self, ticket: str) -> None:
+        with self._lock:
+            digest = self._digest(ticket)
+            self._tickets.pop(digest, None)
+            self._used.discard(digest)
+
+    def consume_status(self, ticket: str) -> str:
+        with self._lock:
+            status = self._status_unlocked(ticket)
+            if status == "valid":
+                self._used.add(self._digest(ticket))
+            return status
 
 
 class DesktopController:
@@ -1461,7 +1490,23 @@ class BridgeHandler(BaseHTTPRequestHandler):
     def _require_master_auth(self) -> bool:
         if self._master_authorized():
             return True
+        # Refused POST bodies must not become the next keep-alive request.
+        # Drain only a small, bounded body so Windows can deliver the 401
+        # without resetting a connection that still has unread input.
+        if self.command == "POST":
+            self.close_connection = True
         self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "unauthorized"})
+        if self.command == "POST":
+            previous_timeout = self.connection.gettimeout()
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if 0 < length <= 65536 and not self.headers.get("Transfer-Encoding"):
+                    self.connection.settimeout(1)
+                    self.rfile.read(length)
+            except (ValueError, OSError):
+                pass
+            finally:
+                self.connection.settimeout(previous_timeout)
         return False
 
     def _read_json(self) -> Optional[dict[str, Any]]:
@@ -1855,12 +1900,30 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 {"ok": True, "attachment": metadata},
             )
             return
+        if self.path == "/api/devices/pairing-status":
+            if not self._require_master_auth():
+                return
+            payload = self._read_json()
+            if payload is None:
+                return
+            ticket = payload.get("pairingTicket")
+            if not isinstance(ticket, str) or not 1 <= len(ticket) <= 256:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_pairing_ticket"})
+                return
+            self._send_json(HTTPStatus.OK, {"ok": True, **self.server.pairing_tickets.status(ticket)})
+            return
         if self.path == "/api/devices/pairing-ticket":
             if not self._require_master_auth():
                 return
             payload = self._read_json()
             if payload is None:
                 return
+            previous = payload.get("replaceTicket", "")
+            if not isinstance(previous, str) or len(previous) > 256:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_pairing_ticket"})
+                return
+            if previous:
+                self.server.pairing_tickets.revoke(previous)
             ticket = self.server.pairing_tickets.create()
             self._send_json(
                 HTTPStatus.CREATED,
@@ -1893,15 +1956,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_device_name"})
                 return
             pairing_ticket = payload.get("pairingTicket", "")
-            ticket_authorized = (
-                isinstance(pairing_ticket, str)
-                and bool(pairing_ticket)
-                and self.server.pairing_tickets.consume(pairing_ticket)
-            )
+            pairing_status = self.server.pairing_tickets.consume_status(pairing_ticket) if (
+                isinstance(pairing_ticket, str) and 1 <= len(pairing_ticket) <= 256
+            ) else "invalid"
+            ticket_authorized = pairing_status == "valid"
             if not self._master_authorized() and not ticket_authorized:
                 self._send_json(
                     HTTPStatus.UNAUTHORIZED,
-                    {"error": "invalid_or_expired_pairing"},
+                    {"error": "invalid_or_expired_pairing", "pairingStatus": pairing_status},
                 )
                 return
             try:

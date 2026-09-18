@@ -197,14 +197,15 @@
     <dialog id="tokenDialog">
       <form id="tokenForm" method="dialog">
         <p class="dialog-eyebrow">DEVICE ACCESS</p>
-        <h2>配对本机 Bridge</h2>
-        <p>推荐扫描 Mac 生成的一次性二维码。配对成功后，这台设备会保持登录，直到你在 Mac 上撤销它。</p>
+        <h2>连接这台电脑</h2>
+        <p id="pairingDestination"></p>
+        <p>扫码或打开链接不会自动配对。请核对电脑地址，再点击“确认配对”。成功后，此浏览器会记住设备。</p>
         <label for="tokenInput">配对信息</label>
         <input id="tokenInput" type="password" minlength="20" autocomplete="off" required>
         <p id="tokenError" class="form-error" aria-live="polite"></p>
         <div class="dialog-actions">
           <button id="tokenCancel" class="secondary-button" type="button">取消</button>
-          <button class="primary-button" type="submit">连接</button>
+          <button class="primary-button" type="submit">确认配对</button>
         </div>
       </form>
     </dialog>
