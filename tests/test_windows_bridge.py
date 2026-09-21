@@ -216,6 +216,22 @@ class WindowsLauncherTest(unittest.TestCase):
         with patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
             parse_args(["serve", "--port", "0"])
 
+    @patch("windows_bridge.subprocess.run")
+    def test_credential_errors_only_expose_allowlisted_codes(self, run):
+        for detail, expected in (
+            ('POCKET_CREDENTIAL_ERROR:reparse_path', 'reparse_path'),
+            ('POCKET_CREDENTIAL_ERROR:protect', 'protect'),
+            ('POCKET_CREDENTIAL_ERROR:private-value', 'unknown'),
+            ('POCKET_CREDENTIAL_ERROR:protect private-value', 'unknown'),
+            ('private-value', 'unknown'),
+        ):
+            with self.subTest(detail=detail):
+                run.return_value = subprocess.CompletedProcess([], 1, 'private-value', detail)
+                with self.assertRaises(RuntimeError) as caught:
+                    windows_token(initialize=True)
+                self.assertIn(f'[{expected}]', str(caught.exception))
+                self.assertNotIn('private-value', str(caught.exception))
+
     def test_windows_entry_point_cannot_start_on_mac(self):
         with patch("windows_bridge.sys.platform", "darwin"), self.assertRaises(SystemExit):
             main(["init"])
@@ -255,7 +271,9 @@ class WindowsNativeSecurityTest(unittest.TestCase):
             )
             self.assertEqual(result.returncode, 0, result.stderr)
             data = json.loads(report.read_text(encoding="utf-8"))
-            self.assertEqual(data, {"label": "恢复", "testsPassed": 53})
+            self.assertEqual(set(data), {"label", "testsPassed"})
+            self.assertEqual(data["label"], "恢复")
+            self.assertGreaterEqual(data["testsPassed"], 61)
 
     def test_dpapi_and_acl_roundtrip_in_isolated_directory(self):
         with tempfile.TemporaryDirectory(prefix="pocket 中文 ") as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory}):

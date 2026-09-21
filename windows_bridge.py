@@ -22,6 +22,12 @@ from mac_bridge import BridgeServer, DeviceRegistry
 
 ROOT = Path(__file__).resolve().parent
 
+CREDENTIAL_ERROR_CODES = frozenset({
+    'environment', 'reparse_path', 'unexpected_owner', 'unexpected_principal',
+    'missing_user_access', 'create_directory', 'validate_acl', 'protect',
+    'write_credential', 'read_credential', 'unprotect',
+})
+
 
 def state_directory() -> Path:
     value = os.environ.get("LOCALAPPDATA")
@@ -43,9 +49,15 @@ def windows_token(*, initialize: bool = False) -> str:
         creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), check=False,
     )
     if result.returncode != 0:
-        # Do not relay script output: a secret must never enter service logs.
+        # Only allowlisted error codes may leave the credential subprocess.
+        code = 'unknown'
+        for line in (result.stderr or '').splitlines():
+            if line.startswith('POCKET_CREDENTIAL_ERROR:'):
+                candidate = line.removeprefix('POCKET_CREDENTIAL_ERROR:')
+                if candidate in CREDENTIAL_ERROR_CODES:
+                    code = candidate
         raise RuntimeError(
-            "Windows credential initialization/read failed. Run "
+            f"Windows credential initialization/read failed [{code}]. Run "
             "scripts/windows-pocket-secret.ps1 -Action Check in PowerShell; "
             "check script policy and the current user's data-directory ACL."
         )

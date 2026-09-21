@@ -2,8 +2,10 @@ param([Parameter(Mandatory=$true)][string]$ReportPath)
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '..\scripts\windows-desktop-diagnostic.ps1') -DefinitionsOnly
 
+$script:checksPassed = 0
 function Assert-Equal($Actual, $Expected, [string]$Reason) {
     if ($Actual -cne $Expected) { throw $Reason }
+    $script:checksPassed++
 }
 
 $restore = [string][char]0x6062 + [char]0x590d
@@ -87,4 +89,4 @@ Assert-Equal (Test-PocketResumeComposer '' @('Resume','Stop')) $false 'Stop conf
 Assert-Equal (Test-PocketResumeComposer '' @('Start voice')) $false 'Voice is never resume.'
 Assert-Equal (Test-PocketResumeComposer '' @('Resume','Continue')) $false 'Ambiguous resume refused.'
 Assert-Equal (Test-PocketResumeLabel "Resume`n") $false 'Only exact labels.'
-Write-PocketDiagnosticReport @{label=$restore; testsPassed=61} $ReportPath
+Write-PocketDiagnosticReport @{label=$restore; testsPassed=$script:checksPassed} $ReportPath
