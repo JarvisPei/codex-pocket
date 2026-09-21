@@ -31,7 +31,15 @@ function Assert-NoReparse([string]$Path) {
 function Assert-PrivateAcl([string]$Path) {
     Assert-NoReparse $Path
     $script:pocketCredentialStage = 'read_acl'
-    $acl = Get-Acl -LiteralPath $Path
+    # Request only the security sections we validate. Avoid provider/default
+    # sections that can require audit-security privileges on hosted runners.
+    $sections = [Security.AccessControl.AccessControlSections]::Access -bor
+        [Security.AccessControl.AccessControlSections]::Owner
+    if ([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::Directory) {
+        $acl = [IO.Directory]::GetAccessControl($Path, $sections)
+    } else {
+        $acl = [IO.File]::GetAccessControl($Path, $sections)
+    }
     # Elevated test runners may create files owned by Administrators. These
     # privileged owners can already take ownership; they are not extra DACL grants.
     $script:pocketCredentialStage = 'read_owner'

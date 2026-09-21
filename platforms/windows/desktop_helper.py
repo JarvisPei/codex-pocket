@@ -78,7 +78,21 @@ def write_signed(path: Path, payload: dict, token: str) -> None:
     try:
         with temporary.open("xb") as output:
             output.write(encoded)
-        os.replace(temporary, path)
+        # Windows readers can briefly hold the destination without delete sharing.
+        # Retry only the atomic replacement, never the requested desktop action.
+        delays = (0.01, 0.02, 0.04, 0.08, 0.16)
+        for attempt in range(len(delays) + 1):
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError as error:
+                if (sys.platform != "win32" or getattr(error, "winerror", None) not in {5, 32, 33}
+                        or attempt == len(delays)):
+                    raise
+                time.sleep(delays[attempt])
+                safe_entry(path.parent, directory=True)
+                if path.exists() or path.is_symlink():
+                    safe_entry(path)
     finally:
         temporary.unlink(missing_ok=True)
 

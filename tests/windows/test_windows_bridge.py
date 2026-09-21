@@ -123,9 +123,12 @@ class WindowsPreviewApiTest(unittest.TestCase):
     def test_native_stop_and_approval_are_explicitly_unsupported(self):
         for path in ("/api/desktop/interrupt", "/api/desktop/request"):
             with self.subTest(path=path):
-                status, payload = self.request("POST", path, {})
-                self.assertEqual(status, 501)
-                self.assertEqual(payload["error"], "desktop_control_unsupported")
+                # Repeat on real sockets: unread bytes can hide 501 behind a
+                # Windows TCP reset when the rejected connection closes.
+                for _ in range(20):
+                    status, payload = self.request("POST", path, {})
+                    self.assertEqual(status, 501)
+                    self.assertEqual(payload["error"], "desktop_control_unsupported")
 
     def test_upload_is_rejected_before_any_disk_write(self):
         device = self.server.device_registry.enroll("test", "test")
@@ -295,6 +298,29 @@ class WindowsNativeSecurityTest(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 windows_token(initialize=True)
             self.assertEqual(secret_file.read_bytes(), b"corrupted")
+
+    def test_broad_credential_acl_is_still_refused(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"LOCALAPPDATA": directory}):
+            windows_token(initialize=True)
+            secret_file = state_directory() / "token.dpapi"
+            before = secret_file.read_bytes()
+            # Only mutate this test's disposable encrypted file, never user data.
+            code = r'''
+$ErrorActionPreference='Stop'
+$path=Join-Path $env:LOCALAPPDATA 'CodexPocket\token.dpapi'
+$sections=[Security.AccessControl.AccessControlSections]::Access
+$acl=[IO.File]::GetAccessControl($path,$sections)
+$everyone=[Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new($everyone,'Read','Allow'))
+[IO.File]::SetAccessControl($path,$acl)
+'''
+            powershell = Path(os.environ["SystemRoot"]) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+            result = subprocess.run([str(powershell), '-NoProfile', '-NonInteractive', '-Command', code],
+                                    capture_output=True, timeout=20)
+            self.assertEqual(result.returncode, 0, 'Could not configure isolated ACL fixture')
+            with self.assertRaisesRegex(RuntimeError, r'\[unexpected_principal\]'):
+                windows_token()
+            self.assertEqual(secret_file.read_bytes(), before)
 
     @unittest.skipUnless(os.environ.get("CODEX_POCKET_TEST_BINARY"), "requires explicit native Codex test binary")
     def test_real_private_backend_with_dpapi_and_loopback_http(self):

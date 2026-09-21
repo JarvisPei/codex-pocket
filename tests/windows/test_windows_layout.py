@@ -38,7 +38,14 @@ class WindowsLayoutTests(unittest.TestCase):
 
     def test_module_entry_points_help_from_repository_root(self):
         for name in ('bridge', 'pocket', 'desktop_helper'):
-            result = subprocess.run([sys.executable, '-m', 'platforms.windows.' + name, '--help'],
+            command = [sys.executable, '-m', 'platforms.windows.' + name, '--help']
+            if sys.flags.isolated:
+                # Embedded Python omits cwd from sys.path; mirror the tray bootstrap.
+                command = [sys.executable, '-c',
+                           'import sys,runpy;sys.path.insert(0,sys.argv.pop(1));'
+                           'runpy.run_module(sys.argv.pop(1),run_name="__main__")',
+                           str(ROOT), 'platforms.windows.' + name, '--help']
+            result = subprocess.run(command,
                                     cwd=ROOT, capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn('usage:', result.stdout)

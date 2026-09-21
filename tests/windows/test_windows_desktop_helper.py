@@ -60,6 +60,48 @@ class DesktopHelperTest(unittest.TestCase):
                 helper.read_signed(path, "key")
             self.assertEqual([p.name for p in root.iterdir()], ["state.json"])
 
+    def test_windows_atomic_write_retries_transient_sharing_errors(self):
+        for code in (5, 32, 33):
+            with self.subTest(code=code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "state.json"
+                helper.write_signed(path, {"value": "old"}, "key")
+                error = PermissionError("sharing conflict")
+                error.winerror = code
+                replace = os.replace
+                attempts = []
+
+                def transient(source, target):
+                    attempts.append(target)
+                    if len(attempts) < 3:
+                        raise error
+                    replace(source, target)
+
+                with patch.object(helper.sys, "platform", "win32"), \
+                        patch.object(helper.os, "replace", side_effect=transient), \
+                        patch.object(helper.time, "sleep") as sleep:
+                    helper.write_signed(path, {"value": "new"}, "key")
+                self.assertEqual(len(attempts), 3)
+                self.assertEqual(sleep.call_count, 2)
+                self.assertEqual(helper.read_signed(path, "key"), {"value": "new"})
+                self.assertEqual(list(root.iterdir()), [path])
+
+    def test_atomic_write_failure_is_bounded_and_preserves_existing_state(self):
+        for platform, code, attempts in (("win32", 5, 6), ("win32", 999, 1), ("darwin", 5, 1)):
+            with self.subTest(platform=platform, code=code), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                path = root / "state.json"
+                helper.write_signed(path, {"value": "old"}, "key")
+                error = PermissionError("access denied")
+                error.winerror = code
+                with patch.object(helper.sys, "platform", platform), \
+                        patch.object(helper.os, "replace", side_effect=error) as replace, \
+                        patch.object(helper.time, "sleep"), self.assertRaises(PermissionError):
+                    helper.write_signed(path, {"value": "new"}, "key")
+                self.assertEqual(replace.call_count, attempts)
+                self.assertEqual(helper.read_signed(path, "key"), {"value": "old"})
+                self.assertEqual(list(root.iterdir()), [path])
+
     @unittest.skipIf(os.name == "nt", "creating test symlinks can require elevation")
     def test_symlink_mailbox_files_are_refused(self):
         with tempfile.TemporaryDirectory() as directory:

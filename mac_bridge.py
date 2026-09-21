@@ -2646,6 +2646,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             if not self.server.runtime.desktop_control:
                 self.close_connection = True
+                self._discard_small_rejected_body()
                 self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "desktop_control_unsupported"})
                 return
             payload = self._read_json()
@@ -2705,6 +2706,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return
         if not self.server.runtime.desktop_control:
             self.close_connection = True
+            self._discard_small_rejected_body()
             self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "desktop_control_unsupported"})
             return
         payload = self._read_json()
