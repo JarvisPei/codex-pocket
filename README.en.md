@@ -1,14 +1,21 @@
 # Codex Pocket
 
-> Windows developer preview: see the [quick start](docs/WINDOWS_QUICKSTART.en.md) and [detailed acceptance records](docs/WINDOWS_PREVIEW.md). Initial checks cover phone pairing, native Send/switch/Stop, Project/Recents creation, text-file reading, and phone-created Project tasks with image reading. The recommended tray entry enables new tasks and local-file handoff by default; separate CLI startup requires explicit flags. Copies remain in the workspace's `.codex-pocket-attachments` directory (not native image chips). Lock/screen-off, native Resume and cross-version compatibility remain limited. No autostart service is installed. The installation below remains macOS-specific.
-
 [中文](README.md)
 
-View and control Codex Desktop on your Mac from a phone, tablet, or other modern browser while keeping Desktop as the real task owner and execution host.
+View and control Codex Desktop on your computer from a phone, tablet, or other modern browser while keeping Desktop as the real task owner and execution host.
 
-Codex Pocket runs a narrow local bridge on the Mac and exposes it to your own tailnet through Tailscale Serve. The phone does not sign in to ChatGPT and never receives Codex credentials, a general shell, or remote-desktop access.
+Codex Pocket runs a narrow local bridge on the computer and exposes it to your own tailnet through Tailscale Serve. The phone does not sign in to ChatGPT and never receives Codex credentials, a general shell, or remote-desktop access.
 
-## Features
+## Choose your computer platform
+
+- **macOS**: [Install](#install). The feature list and installation instructions below describe macOS.
+- **Windows 11 (developer preview)**: [Quick start](docs/WINDOWS_QUICKSTART.en.md) · [Scope and limitations](docs/WINDOWS_PREVIEW.md). Run `Start Pocket.cmd` once, then use the desktop shortcut; no persistent terminal is required.
+
+Windows does not promise locked-screen operation. Native Resume is off by default,
+and attachments are handed off as workspace file paths. Windows code lives in
+`platforms/windows/`, with tests in `tests/windows/`; browser and protocol code are shared.
+
+## Features (macOS)
 
 - Mirror Codex Desktop Projects and Recents.
 - Collect running, attention-required, Desktop-unread, and pinned tasks at the top of the drawer; opening a task on mobile acknowledges it as read while preserving its Project/Recents placement.

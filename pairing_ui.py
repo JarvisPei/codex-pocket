@@ -232,7 +232,7 @@ def main(argv=None):
             return 0
         wait_for_bridge(args.port, args.wait_ready)
         if sys.platform == 'win32':
-            from windows_bridge import windows_token
+            from platforms.windows.bridge import windows_token
             token = windows_token()
         elif sys.platform == 'darwin':
             result = subprocess.run(['/usr/bin/security', 'find-generic-password', '-w', '-s',

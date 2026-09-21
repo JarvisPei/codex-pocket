@@ -1,14 +1,20 @@
 # Codex Pocket
 
-> Windows 开发预览：见[上手指南](docs/WINDOWS_QUICKSTART.md)和[详细验收记录](docs/WINDOWS_PREVIEW.md)。已初步验证手机配对、原生发送/切换/停止、Project/Recents 新建任务、文本文件读取，以及手机新建 Project 任务并读取图片。推荐托盘入口默认启用新建任务和文件路径模式，独立命令行启动时才需显式开启；附件保留在工作目录 `.codex-pocket-attachments`（不是原生图片卡片）。锁屏/熄屏、原生“继续”和跨版本兼容仍有限制，不安装自启动服务。下方仍是 macOS 安装流程。
-
 [English](README.en.md)
 
-在手机、平板或其他现代浏览器中查看和控制 Mac 上的 Codex Desktop，同时让 Desktop 保持任务的真正执行者。
+在手机、平板或其他现代浏览器中查看和控制电脑上的 Codex Desktop，同时让 Desktop 保持任务的真正执行者。
 
-Codex Pocket 在 Mac 本机运行一个窄接口 Bridge，通过 Tailscale Serve 暴露给自己的 tailnet。手机不需要登录 ChatGPT，也不会获得 Codex 凭据、通用终端或远程桌面权限。
+Codex Pocket 在电脑本机运行一个窄接口 Bridge，通过 Tailscale Serve 暴露给自己的 tailnet。手机不需要登录 ChatGPT，也不会获得 Codex 凭据、通用终端或远程桌面权限。
 
-## 已实现
+## 选择你的电脑平台
+
+- **macOS**：[安装 Bridge](#安装-bridge)，下方功能和安装说明以 macOS 为主。
+- **Windows 11（开发预览）**：[上手指南](docs/WINDOWS_QUICKSTART.md) · [支持范围与限制](docs/WINDOWS_PREVIEW.md)。首次运行 `Start Pocket.cmd`，以后使用桌面快捷方式；不要求常驻终端。
+
+Windows 暂不承诺锁屏运行，原生“继续”默认关闭，附件采用工作目录文件路径交付。
+Windows 专用代码在 `platforms/windows/`，测试在 `tests/windows/`；网页和协议代码由两个平台共用。
+
+## 已实现（macOS）
 
 - 按 Codex Desktop 的 Projects 和 Recents 展示持久化任务。
 - 在抽屉顶部聚合运行中、需要处理、Desktop 未读和已置顶的任务；手机打开任务会同步已读状态，同时保留原有 Project/Recents 归属。

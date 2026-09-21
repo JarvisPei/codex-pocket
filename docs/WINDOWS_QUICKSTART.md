@@ -1,9 +1,9 @@
 # Windows 11 上手指南（开发预览）
 
-[English](WINDOWS_QUICKSTART.en.md) · [详细限制与验收记录](WINDOWS_PREVIEW.md)
+[English](WINDOWS_QUICKSTART.en.md) · [支持范围与限制](WINDOWS_PREVIEW.md)
 
 本指南对应**包含 Windows 文件的预览源码**，不是安装包或正式稳定版。先确认目录里有
-`windows_bridge.py` 和 `scripts/windows-start-desktop-helper.ps1`；旧版 macOS 源码不能照此启动。
+`platforms/windows/bridge.py` 和 `platforms/windows/scripts/windows-start-desktop-helper.ps1`；旧版 macOS 源码不能照此启动。
 不需要 AI、SSH、远程桌面或管理员身份运行 Pocket，也不需要在手机登录 ChatGPT。
 
 ## 1. 准备
@@ -37,7 +37,7 @@ Pocket 会查找标准安装目录中的 `codex.exe`：只有唯一候选且版�
 多个候选或检查失败时明确提示手动选择。启动连接成功后会记住路径。也可从普通 PowerShell 首次传入 Python 路径：
 
 ```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File scripts\windows-pocket-tray.ps1 -PythonBinary $pythonBinary
+powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File platforms\windows\scripts\windows-pocket-tray.ps1 -PythonBinary $pythonBinary
 ```
 
 之后每天只需双击桌面的 **Codex Pocket**，不必单独打开桌面助手或保留终端。
@@ -78,7 +78,7 @@ Get-ChildItem -LiteralPath "$env:LOCALAPPDATA\OpenAI\Codex\bin" -Filter codex.ex
 
 ```powershell
 $codexBinary = 'C:\实际安装路径\codex.exe'
-& $pythonBinary windows_bridge.py doctor --codex-binary $codexBinary
+& $pythonBinary -m platforms.windows.bridge doctor --codex-binary $codexBinary
 if ($LASTEXITCODE -ne 0) { throw 'CLI 检查未通过，先按输出排错' }
 ```
 
@@ -87,11 +87,11 @@ if ($LASTEXITCODE -ne 0) { throw 'CLI 检查未通过，先按输出排错' }
 独立启动前，先打开 Codex Desktop，确保输入框没有未保存草稿。
 
 ```powershell
-& $pythonBinary windows_bridge.py init
+& $pythonBinary -m platforms.windows.bridge init
 if ($LASTEXITCODE -ne 0) { throw '凭据初始化失败，不要删除旧凭据或放宽权限' }
-powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File scripts\windows-start-desktop-helper.ps1 -PythonBinary $pythonBinary -EnableNativeSend -EnableNativeStop
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File platforms\windows\scripts\windows-start-desktop-helper.ps1 -PythonBinary $pythonBinary -EnableNativeSend -EnableNativeStop
 if ($LASTEXITCODE -ne 0) { throw '桌面助手未启动，请先排错' }
-& $pythonBinary windows_bridge.py serve --codex-binary $codexBinary --native-text-send --native-new-tasks --attachment-paths
+& $pythonBinary -m platforms.windows.bridge serve --codex-binary $codexBinary --native-text-send --native-new-tasks --attachment-paths
 ```
 
 最后一行会持续运行，**仅此独立启动方式需要保持该 PowerShell 窗口打开**。
@@ -136,7 +136,7 @@ tailscale serve status
 新建一个**普通 PowerShell**，进入同一源码目录，先检查组件：
 
 ```powershell
-py -3 windows_bridge.py doctor --codex-binary 'C:\实际安装路径\codex.exe' --native
+py -3 -m platforms.windows.bridge doctor --codex-binary 'C:\实际安装路径\codex.exe' --native
 ```
 
 检查通过后：
@@ -191,4 +191,8 @@ Recents 旁的「＋」创建不属于 Project 的任务。
 - **脚本被策略阻止**：不要使用全局 `Bypass`、禁用终端防护或放宽数据目录 ACL；遵循组织批准的脚本执行方式。
 - **需要分享诊断**：`doctor --native --json` 输出脱敏检查结果，不含密钥和对话；仍应在分享前检查内容。
 
-这不是自启动安装器。更细的已测范围、升级和安全边界见[开发预览说明](WINDOWS_PREVIEW.md)。
+升级旧预览版时，先从托盘退出 Pocket，更新源码后重新运行 `Start Pocket.cmd`。
+脚本现在位于 `platforms/windows/scripts/`；不要继续调用旧的根目录 Windows 脚本。
+不要删除 `%LOCALAPPDATA%\CodexPocket`，已有配对会保留。
+
+这不是自启动安装器。支持范围和安全边界见[开发预览说明](WINDOWS_PREVIEW.md)。

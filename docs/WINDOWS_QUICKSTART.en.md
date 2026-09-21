@@ -1,9 +1,9 @@
 # Windows 11 quick start (developer preview)
 
-[中文](WINDOWS_QUICKSTART.md) · [Detailed limitations and acceptance records](WINDOWS_PREVIEW.md)
+[中文](WINDOWS_QUICKSTART.md) · [Scope and limitations](WINDOWS_PREVIEW.md)
 
-Use a preview source checkout that contains `windows_bridge.py` and
-`scripts/windows-start-desktop-helper.ps1`. This is not a packaged installer or
+Use a preview source checkout that contains `platforms/windows/bridge.py` and
+`platforms/windows/scripts/windows-start-desktop-helper.ps1`. This is not a packaged installer or
 a stable Windows release; older macOS-only source cannot follow these steps.
 Pocket does not require AI assistance, SSH, remote desktop, or a ChatGPT login on
 your phone. Run Pocket as your regular Windows user, not Administrator.
@@ -44,7 +44,7 @@ Multiple candidates or validation failures require explicit selection. Successfu
 service startup remembers the paths. Alternatively, supply the Python path once:
 
 ```powershell
-powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File scripts\windows-pocket-tray.ps1 -PythonBinary $pythonBinary
+powershell.exe -NoProfile -STA -ExecutionPolicy RemoteSigned -File platforms\windows\scripts\windows-pocket-tray.ps1 -PythonBinary $pythonBinary
 ```
 
 For daily use, double-click the desktop **Codex Pocket** shortcut. Its GUI bootstrap
@@ -94,7 +94,7 @@ below with that absolute path, not the Desktop GUI executable or a `.cmd` shim:
 
 ```powershell
 $codexBinary = 'C:\actual-installation\codex.exe'
-& $pythonBinary windows_bridge.py doctor --codex-binary $codexBinary
+& $pythonBinary -m platforms.windows.bridge doctor --codex-binary $codexBinary
 if ($LASTEXITCODE -ne 0) { throw 'Resolve the CLI check failure first' }
 ```
 
@@ -104,11 +104,11 @@ Before starting separate components, open Codex Desktop and preserve/clear any
 unsent composer draft.
 
 ```powershell
-& $pythonBinary windows_bridge.py init
+& $pythonBinary -m platforms.windows.bridge init
 if ($LASTEXITCODE -ne 0) { throw 'Credential initialization failed; do not delete old credentials or loosen permissions' }
-powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File scripts\windows-start-desktop-helper.ps1 -PythonBinary $pythonBinary -EnableNativeSend -EnableNativeStop
+powershell.exe -NoProfile -ExecutionPolicy RemoteSigned -File platforms\windows\scripts\windows-start-desktop-helper.ps1 -PythonBinary $pythonBinary -EnableNativeSend -EnableNativeStop
 if ($LASTEXITCODE -ne 0) { throw 'Resolve the desktop helper failure first' }
-& $pythonBinary windows_bridge.py serve --codex-binary $codexBinary --native-text-send --native-new-tasks --attachment-paths
+& $pythonBinary -m platforms.windows.bridge serve --codex-binary $codexBinary --native-text-send --native-new-tasks --attachment-paths
 ```
 
 **Only this separate-component mode requires keeping its PowerShell window open.**
@@ -154,7 +154,7 @@ Open another regular PowerShell in the same source directory. Replace the CLI
 path explicitly; variables from other PowerShell windows are not shared:
 
 ```powershell
-py -3 windows_bridge.py doctor --codex-binary 'C:\actual-installation\codex.exe' --native
+py -3 -m platforms.windows.bridge doctor --codex-binary 'C:\actual-installation\codex.exe' --native
 ```
 
 After the checks pass:
@@ -225,5 +225,10 @@ are not yet promised reliable.
 - **Share diagnostics:** `doctor --native --json` produces sanitized checks without
   keys or conversations; review output before sharing.
 
+To upgrade an older preview, exit Pocket from the tray, update the source, then
+run `Start Pocket.cmd` again. Scripts now live in `platforms/windows/scripts/`;
+do not keep invoking the old root-level Windows entry points. Preserve
+`%LOCALAPPDATA%\CodexPocket` to retain pairing.
+
 There is no autostart installer. See the [preview guide](WINDOWS_PREVIEW.md) for
-detailed acceptance scope and security boundaries.
+supported scope and security boundaries.

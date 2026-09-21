@@ -153,8 +153,8 @@ class FirstInstallTest(unittest.TestCase):
         self.assertIsNotNone(popen.call_args.kwargs['stdout'])
 
     def test_windows_hook_only_runs_once_and_keeps_pending_on_failure(self):
-        from windows_bridge import open_first_install_pairing
-        with tempfile.TemporaryDirectory() as directory, patch('windows_bridge.state_directory', return_value=Path(directory)), patch('pairing_ui.launch_pairing_display') as launch:
+        from platforms.windows.bridge import open_first_install_pairing
+        with tempfile.TemporaryDirectory() as directory, patch('platforms.windows.bridge.state_directory', return_value=Path(directory)), patch('pairing_ui.launch_pairing_display') as launch:
             marker = Path(directory) / 'first-pairing.pending'
             open_first_install_pairing(); launch.assert_not_called()
             marker.touch()
@@ -165,8 +165,8 @@ class FirstInstallTest(unittest.TestCase):
             open_first_install_pairing(); self.assertEqual(launch.call_count, 2)
 
     def test_windows_init_marks_only_new_installations(self):
-        import windows_bridge
-        with tempfile.TemporaryDirectory() as directory, patch('windows_bridge.sys.platform', 'win32'), patch('windows_bridge.state_directory', return_value=Path(directory)), patch('windows_bridge.windows_token'):
+        from platforms.windows import bridge as windows_bridge
+        with tempfile.TemporaryDirectory() as directory, patch('platforms.windows.bridge.sys.platform', 'win32'), patch('platforms.windows.bridge.state_directory', return_value=Path(directory)), patch('platforms.windows.bridge.windows_token'):
             marker = Path(directory) / 'first-pairing.pending'
             self.assertEqual(windows_bridge.main(['init']), 0)
             self.assertTrue(marker.exists())

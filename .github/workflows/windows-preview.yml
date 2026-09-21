@@ -14,6 +14,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
         python-version: ['3.11', '3.13']
     steps:
@@ -27,7 +28,7 @@ jobs:
       - name: Parse Windows helper without running it
         shell: powershell
         run: |
-          foreach ($script in (Get-ChildItem -LiteralPath ./scripts -Filter 'windows-*.ps1' -File)) {
+          foreach ($script in (Get-ChildItem -LiteralPath ./platforms/windows/scripts -Filter 'windows-*.ps1' -File)) {
             $tokens = $null
             $errors = $null
             [System.Management.Automation.Language.Parser]::ParseFile(
@@ -35,57 +36,59 @@ jobs:
             if ($errors.Count) { $errors | Write-Error; exit 1 }
           }
       - name: Native DPAPI, ACL, and HTTP contract tests (no account or model)
-        run: python -m unittest discover -s tests -p test_windows_bridge.py
+        run: python -m unittest discover -s tests/windows -p test_windows_bridge.py
       - name: CLI update discovery (isolated fixtures, no account or model)
         shell: powershell
-        run: ./tests/test_windows_cli_discovery.ps1
+        run: ./tests/windows/test_windows_cli_discovery.ps1
       - name: Compile GUI bootstrap and verify no-console child (isolated fixtures)
         shell: powershell
-        run: ./tests/test_windows_gui_launcher.ps1
+        run: ./tests/windows/test_windows_gui_launcher.ps1
       - name: Tray runtime ownership and shutdown (fake services)
-        run: python -m unittest discover -s tests -p test_windows_pocket.py
+        run: python -m unittest discover -s tests/windows -p test_windows_pocket.py
       - name: Compile read-only session guard and check lock-state policy
         shell: powershell
-        run: ./tests/test_windows_session_state.ps1
+        run: ./tests/windows/test_windows_session_state.ps1
       - name: Compile display observer and verify opt-in display-off route policy
         shell: powershell
-        run: ./tests/test_windows_display_off.ps1
+        run: ./tests/windows/test_windows_display_off.ps1
       - name: Bounded read-only readiness retries (fake snapshots)
         shell: powershell
-        run: ./tests/test_windows_readiness.ps1
+        run: ./tests/windows/test_windows_readiness.ps1
       - name: Compile opt-in taskbar input and check identity policy (no clicks)
         shell: powershell
-        run: ./tests/test_windows_taskbar.ps1
+        run: ./tests/windows/test_windows_taskbar.ps1
       - name: Read-only native setup diagnostics (mock dependencies)
-        run: python -m unittest discover -s tests -p test_windows_doctor.py
+        run: python -m unittest discover -s tests/windows -p test_windows_doctor.py
       - name: Reader and per-turn writer lifecycle tests
         run: python -m unittest discover -s tests -p test_app_server_lifecycle.py
       - name: Restricted desktop diagnostic mailbox
-        run: python -m unittest discover -s tests -p test_windows_desktop_helper.py
+        run: python -m unittest discover -s tests/windows -p test_windows_desktop_helper.py
       - name: Read-only composer classification
-        run: python -m unittest discover -s tests -p test_windows_desktop_controls.py
+        run: python -m unittest discover -s tests/windows -p test_windows_desktop_controls.py
       - name: Native composer and localized label guards (fixtures, no clicks)
         shell: powershell
-        run: ./tests/test_windows_desktop_diagnostic.ps1 -ReportPath (Join-Path $env:RUNNER_TEMP 'pocket-diagnostic-test.json')
+        run: ./tests/windows/test_windows_desktop_diagnostic.ps1 -ReportPath (Join-Path $env:RUNNER_TEMP 'pocket-diagnostic-test.json')
       - name: Project membership and pinned task fixtures
-        run: python -m unittest discover -s tests -p test_windows_projects.py
+        run: python -m unittest discover -s tests/windows -p test_windows_projects.py
       - name: Thread identity guards
-        run: python -m unittest discover -s tests -p test_windows_thread_identity.py
+        run: python -m unittest discover -s tests/windows -p test_windows_thread_identity.py
+      - name: Platform layout and entry points
+        run: python -m unittest discover -s tests/windows -p test_windows_layout.py
       - name: Account-scoped read-state synchronization (fixtures)
-        run: python -m unittest discover -s tests -p test_windows_read_state.py
+        run: python -m unittest discover -s tests/windows -p test_windows_read_state.py
       - name: Native text delivery guards and durable receipts (fake UI)
-        run: python -m unittest discover -s tests -p test_windows_delivery.py
+        run: python -m unittest discover -s tests/windows -p test_windows_delivery.py
       - name: Guarded empty-thread creation and native first-message receipts (fake UI)
-        run: python -m unittest discover -s tests -p test_windows_create.py
+        run: python -m unittest discover -s tests/windows -p test_windows_create.py
       - name: Opt-in local file uploads, ownership and retained handoff paths (fake UI)
-        run: python -m unittest discover -s tests -p test_windows_attachments.py
+        run: python -m unittest discover -s tests/windows -p test_windows_attachments.py
       - name: Attachment ACL repair (isolated fixture only)
         shell: powershell
-        run: ./tests/test_windows_attachment_acl.ps1
+        run: ./tests/windows/test_windows_attachment_acl.ps1
       - name: Two-phase native Stop guards and idempotency (fake UI)
-        run: python -m unittest discover -s tests -p test_windows_stop.py
+        run: python -m unittest discover -s tests/windows -p test_windows_stop.py
       - name: Two-phase native Continue guards and idempotency (fake UI)
-        run: python -m unittest discover -s tests -p "test_windows_resume*.py"
+        run: python -m unittest discover -s tests/windows -p "test_windows_resume*.py"
       - name: Browser capability behavior
         run: node --test tests/test_web_capabilities.cjs tests/test_web_pairing.cjs tests/test_web_read_state.cjs
       - name: Local QR pairing and single-use tickets
