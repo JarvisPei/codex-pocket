@@ -52,7 +52,7 @@
       <div class="drawer-footer">
         <span id="deviceDot" class="connection-dot pending"></span>
         <span class="device-summary">
-          <span id="deviceStatus">正在连接 Mac…</span>
+          <span id="deviceStatus">正在连接电脑…</span>
           <small class="device-metrics" aria-live="polite">
             <span id="macBattery">电量 --</span>
             <span aria-hidden="true">·</span>
@@ -150,14 +150,14 @@
       <form id="newTaskForm" method="dialog">
         <p class="dialog-eyebrow">NEW DESKTOP TASK</p>
         <h2>新建任务</h2>
-        <p>任务将创建在 <strong id="newTaskDestination"></strong>，并切换到 Mac 上由 Desktop 执行。</p>
+        <p>任务将创建在 <strong id="newTaskDestination"></strong>。<span id="newTaskExecutionHint">由电脑上的 Desktop 执行。</span></p>
         <label for="newTaskMessage">第一条指令</label>
         <textarea id="newTaskMessage" rows="5" maxlength="20000" placeholder="告诉 Codex 要做什么…"></textarea>
         <div id="newTaskAttachments" class="composer-attachments new-task-attachments" hidden></div>
         <div class="new-task-attachment-row">
           <button id="newTaskAttachmentButton" class="secondary-button new-task-attachment-button" type="button">＋ 添加文件</button>
           <input id="newTaskAttachmentInput" type="file" multiple hidden>
-          <span>最多 4 个 · 单个 20 MB</span>
+          <span id="newTaskAttachmentHint">最多 4 个 · 单个 20 MB</span>
         </div>
         <p id="newTaskModelHint" class="model-option-description"></p>
         <p id="newTaskError" class="form-error" aria-live="polite"></p>

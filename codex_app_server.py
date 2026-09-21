@@ -71,13 +71,15 @@ class CodexAppServerClient:
             return
         try:
             self._process = subprocess.Popen(
-                [str(self.codex_binary), "app-server", "--stdio"],
+                # Stdio is the default transport, including native Windows.
+                [str(self.codex_binary), "app-server"],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
         except OSError as error:
             raise AppServerError("Unable to start Codex app-server.") from error
@@ -585,19 +587,22 @@ class CodexAppServerClient:
         model: Optional[str] = None,
         effort: Optional[str] = None,
         service_tier: Optional[str] = None,
+        project_id: Optional[str] = None,
     ) -> dict[str, Any]:
         """Create an idle persisted thread for Codex Desktop to take over."""
         if not self._dedicated:
             with self._temporary_writer() as writer:
                 result = writer.create_thread(
                     title=title, cwd=cwd, model=model, effort=effort,
-                    service_tier=service_tier,
+                    service_tier=service_tier, **({'project_id': project_id} if project_id is not None else {}),
                 )
             if model and effort:
                 with self._settings_lock:
                     self._settings_overrides[result["thread"]["id"]] = dict(result["settings"])
             return result
         params: dict[str, Any] = {"ephemeral": False}
+        if project_id is not None:
+            params["projectId"] = project_id
         if cwd:
             params["cwd"] = cwd
         if model:
@@ -916,7 +921,7 @@ def _read_saved_model_settings(thread_id: str) -> dict[str, str]:
         return {}
     connection = None
     try:
-        connection = sqlite3.connect(databases[0].as_uri() + "?mode=ro", timeout=1)
+        connection = sqlite3.connect(databases[0].as_uri() + "?mode=ro", uri=True, timeout=1)
         row = connection.execute(
             "SELECT model, reasoning_effort FROM threads WHERE id = ?", (thread_id,),
         ).fetchone()
@@ -1108,6 +1113,7 @@ def load_codex_project_index(state_path: Path) -> dict[str, Any]:
     raw_projects = state.get("local-projects")
     raw_order = state.get("project-order")
     raw_assignments = state.get("thread-project-assignments")
+    raw_projectless = state.get("projectless-thread-ids")
     raw_pinned_thread_ids = state.get("pinned-thread-ids")
     persisted_atoms = state.get("electron-persisted-atom-state")
     unread_by_host = (
@@ -1172,6 +1178,8 @@ def load_codex_project_index(state_path: Path) -> dict[str, Any]:
     return {
         "projects": projects,
         "assignments": assignments,
+        "projectlessThreadIds": {value for value in raw_projectless if isinstance(value, str)}
+        if isinstance(raw_projectless, list) else set(),
         "pinnedThreadIds": pinned_thread_ids,
         "unreadThreadIds": unread_thread_ids,
     }
@@ -1296,13 +1304,13 @@ def summarize_thread(
     cwd = _bounded_text(thread.get("cwd"), 1_000)
     thread_id = str(thread.get("id", ""))
     project = None
-    if isinstance(project_index, dict):
+    if isinstance(project_index, dict) and thread_id not in project_index.get("projectlessThreadIds", set()):
         assignments = project_index.get("assignments")
         projects = project_index.get("projects")
         if isinstance(assignments, dict) and isinstance(projects, dict):
             project_id = assignments.get(thread_id)
             candidate = projects.get(project_id)
-            if not isinstance(candidate, dict) and cwd:
+            if not isinstance(candidate, dict) and cwd and not project_index.get('authoritativeProjects'):
                 try:
                     normalized_cwd = os.path.normcase(os.path.realpath(cwd))
                 except (OSError, TypeError, ValueError):
@@ -1351,13 +1359,19 @@ def summarize_thread(
         "project": project,
         "createdAt": thread.get("createdAt"),
         "updatedAt": thread.get("updatedAt"),
-        # Current Codex Desktop persists pins in global UI state, while some
-        # app-server builds also expose isPinned directly. Accept both.
+        # Modern Windows snapshots use the database as the authority, including
+        # unpins. Older readers still accept global UI state or API metadata.
         "isPinned": bool(
-            thread.get("isPinned", False)
-            or thread_id in pinned_thread_ids
+            thread_id in pinned_thread_ids
+            or (thread.get("isPinned", False) and not (
+                isinstance(project_index, dict)
+                and project_index.get("authoritativePins")
+            ))
         ),
         "isUnread": bool(thread_id in unread_thread_ids),
+        "readStateAuthoritative": bool((project_index or {}).get("readStateAuthoritative")),
+        "readStateAvailable": bool((project_index or {}).get("readStateAvailable")),
+        "readStateScope": str((project_index or {}).get("readStateScope", "")),
         "status": _status(thread.get("status")),
         "activityStatus": activity_snapshot["status"],
         "source": thread.get("source"),

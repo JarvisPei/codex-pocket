@@ -4,6 +4,7 @@ import sqlite3
 import subprocess
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -64,7 +65,7 @@ class ReadOnlySettingsTest(unittest.TestCase):
     def test_saved_settings_use_read_only_versioned_database(self):
         with tempfile.TemporaryDirectory() as root:
             path = Path(root) / "state_10.sqlite"
-            with sqlite3.connect(path) as db:
+            with closing(sqlite3.connect(path)) as db, db:
                 db.execute("CREATE TABLE threads (id TEXT, model TEXT, reasoning_effort TEXT)")
                 db.execute("INSERT INTO threads VALUES (?, ?, ?)", ("t1", "saved", "low"))
             with patch.dict(os.environ, {"CODEX_HOME": root}):
@@ -76,9 +77,20 @@ class ReadOnlySettingsTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root, patch.dict(os.environ, {"CODEX_HOME": root}):
             self.assertEqual(_read_saved_model_settings("t1"), {})
             self.assertEqual(list(Path(root).iterdir()), [])
-            with sqlite3.connect(Path(root) / "state_1.sqlite") as db:
+            with closing(sqlite3.connect(Path(root) / "state_1.sqlite")) as db, db:
                 db.execute("CREATE TABLE threads (id TEXT)")
             self.assertEqual(_read_saved_model_settings("t1"), {})
+
+    def test_saved_database_explicitly_uses_read_only_uri_mode(self):
+        with tempfile.TemporaryDirectory(prefix="pocket space ") as root:
+            path = Path(root) / "state_1.sqlite"
+            path.touch()
+            with patch.dict(os.environ, {"CODEX_HOME": root}), \
+                    patch("codex_app_server.sqlite3.connect") as connect:
+                connect.return_value.execute.return_value.fetchone.return_value = None
+                self.assertEqual(_read_saved_model_settings("t1"), {})
+                connect.assert_called_once_with(path.as_uri() + "?mode=ro", uri=True, timeout=1)
+                connect.return_value.close.assert_called_once()
 
 
 class WriterOwnershipTest(unittest.TestCase):
@@ -237,10 +249,11 @@ class WriterOwnershipTest(unittest.TestCase):
             {}, {"thread": {"id": "new"}},
         ]
         with patch("codex_app_server.CodexAppServerClient", return_value=writer):
-            result = self.reader.create_thread(title="new task")
+            result = self.reader.create_thread(title="new task", project_id="modern-project")
         self.assertEqual(result["thread"]["id"], "new")
         self.assertEqual([c.args[0] for c in writer.request.call_args_list],
                          ["thread/start", "thread/name/set", "thread/resume"])
+        self.assertEqual(writer.request.call_args_list[0].args[1]['projectId'], 'modern-project')
         writer.close.assert_called_once()
 
 

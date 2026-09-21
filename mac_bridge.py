@@ -26,6 +26,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from bridge_runtime import BridgeRuntime
+
 from codex_app_server import (
     AppServerError,
     CodexAppServerClient,
@@ -87,6 +89,9 @@ def latest_turn_status(thread: dict[str, Any]) -> str:
 
 
 def thread_turn_is_active(thread: dict[str, Any]) -> bool:
+    status = thread.get("status")
+    if isinstance(status, dict) and status.get("type") == "active":
+        return True
     active_statuses = {
         "starting",
         "inProgress",
@@ -378,6 +383,8 @@ def create_projectless_workspace(root: Path, title: str) -> Path:
     dated_root.mkdir(parents=True, exist_ok=True)
     words = re.findall(r"[a-z0-9]+", title.lower())
     base = "-".join(words)[:48].strip("-") or "new-chat"
+    if re.fullmatch(r"(?i:con|prn|aux|nul|com[1-9]|lpt[1-9])", base):
+        base = f"task-{base}"
     for index in range(1, 10_000):
         name = base if index == 1 else f"{base}-{index}"
         candidate = dated_root / name
@@ -566,7 +573,9 @@ class DeviceRegistry:
             dir=self.path.parent,
         )
         try:
-            os.fchmod(descriptor, 0o600)
+            # Windows uses the protected parent DACL installed by its launcher.
+            if hasattr(os, "fchmod"):
+                os.fchmod(descriptor, 0o600)
             with os.fdopen(descriptor, "w", encoding="utf-8") as output:
                 json.dump(payload, output, ensure_ascii=False, separators=(",", ":"))
                 output.write("\n")
@@ -693,6 +702,10 @@ class AttachmentStore:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         os.chmod(self.root, 0o700)
 
+    def _create_upload_directory(self, directory: Path) -> None:
+        directory.mkdir(mode=0o700)
+        os.chmod(directory, 0o700)
+
     def _remove_unlocked(self, attachment_id: str) -> None:
         directory = self.root / attachment_id
         try:
@@ -752,8 +765,7 @@ class AttachmentStore:
             self._ensure_root()
             attachment_id = secrets.token_urlsafe(18)
             directory = self.root / attachment_id
-            directory.mkdir(mode=0o700)
-            os.chmod(directory, 0o700)
+            self._create_upload_directory(directory)
             file_path = directory / name
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):
@@ -1277,8 +1289,12 @@ class BridgeServer(ThreadingHTTPServer):
         attachment_store: Optional[AttachmentStore] = None,
         projectless_root: Optional[Path] = None,
         screen_lock_probe: Optional[Callable[[], Optional[bool]]] = None,
+        runtime: Optional[BridgeRuntime] = None,
+        battery_probe: Optional[Callable[[], dict[str, Any]]] = None,
     ) -> None:
         self.token = token
+        self.runtime = runtime or BridgeRuntime()
+        self.battery_probe = battery_probe or (lambda: read_mac_battery())
         self.controller = controller
         self.web_root = web_root or Path(__file__).resolve().parent / "web"
         self.device_registry = device_registry or DeviceRegistry()
@@ -1319,6 +1335,14 @@ class BridgeServer(ThreadingHTTPServer):
     def screen_is_locked(self) -> bool:
         """Fail closed: background dispatch is allowed only on a definite lock."""
         return self.screen_lock_state() is True
+
+    def uses_background_execution(self) -> bool:
+        # Windows preview is an explicit backend mode, not a fake lock signal.
+        return self.runtime.execution_mode == "background" or self.screen_is_locked()
+
+    def mark_thread_read(self, thread_id: str, payload: dict[str, Any]) -> None:
+        set_codex_thread_unread_state(self.codex_state_path, thread_id, False)
+        self.project_index()
 
     def project_index(self) -> dict[str, Any]:
         """Keep a last-known complete sidebar while Desktop rewrites its state."""
@@ -1405,6 +1429,36 @@ class BridgeHandler(BaseHTTPRequestHandler):
             ensure_ascii=False,
         ).encode("utf-8")
         self._send_bytes(status, body, "application/json; charset=utf-8")
+
+    def _discard_small_rejected_body(self) -> None:
+        """Best-effort bounded drain so Windows does not reset a small rejection.
+
+        Closing with unread incoming bytes can hide the error response behind a
+        TCP reset. Never parse/store the payload or wait for a full large upload.
+        Only called after device authentication, with Connection: close enforced.
+        """
+        try:
+            remaining = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            return
+        if self.headers.get("Transfer-Encoding") or not 0 < remaining <= 65536:
+            return
+        previous_timeout = self.connection.gettimeout()
+        deadline = time.monotonic() + 0.25
+        try:
+            while remaining > 0:
+                budget = deadline - time.monotonic()
+                if budget <= 0:
+                    break
+                self.connection.settimeout(budget)
+                chunk = self.rfile.read1(min(remaining, 8192))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+        except OSError:
+            pass
+        finally:
+            self.connection.settimeout(previous_timeout)
 
     def _send_bytes(
         self,
@@ -1546,6 +1600,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
             return False, []
         if not attachment_ids:
             return True, []
+        if not self.server.runtime.attachments:
+            self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "attachments_unsupported"})
+            return False, []
         device = self._device_identity()
         if device is None:
             self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "device_required"})
@@ -1587,7 +1644,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
             )
             return
         if path == "/health":
-            self._send_json(HTTPStatus.OK, {"ok": True, "service": "mac-codex-bridge"})
+            self._send_json(HTTPStatus.OK, {
+                "ok": True,
+                "service": "mac-codex-bridge" if self.server.runtime.platform == "macos"
+                else "codex-pocket-bridge",
+                "capabilities": self.server.runtime.capabilities(),
+            })
             return
         if path == "/api/devices":
             if not self._require_master_auth():
@@ -1611,8 +1673,9 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 HTTPStatus.OK,
                 {
                     "ok": True,
-                    "battery": read_mac_battery(),
-                    "localHotspot": read_local_hotspot_status(),
+                    "battery": self.server.battery_probe(),
+                    "localHotspot": read_local_hotspot_status()
+                    if self.server.runtime.platform == "macos" else {"configured": False},
                 },
             )
             return
@@ -1818,6 +1881,13 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if path == "/api/desktop/interrupt/status":
             if not self._require_control_auth():
                 return
+            if not self.server.runtime.desktop_control:
+                self._send_json(HTTPStatus.OK, {
+                    "ok": True, "taskTitle": "", "stopCandidates": 0,
+                    "interruptible": False, "request": None,
+                    "capabilities": self.server.runtime.capabilities(),
+                })
+                return
             try:
                 status = self.server.controller.status()
             except (RuntimeError, TaskIdentityError) as error:
@@ -1840,6 +1910,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     "interruptible": count <= 1,
                     "stopCandidates": count,
                     "request": status.get("request"),
+                    "capabilities": self.server.runtime.capabilities(),
                 },
             )
             return
@@ -1851,6 +1922,11 @@ class BridgeHandler(BaseHTTPRequestHandler):
             if device is None:
                 self.close_connection = True
                 self._send_json(HTTPStatus.UNAUTHORIZED, {"error": "device_required"})
+                return
+            if not self.server.runtime.attachments:
+                self.close_connection = True
+                self._discard_small_rejected_body()
+                self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "attachments_unsupported"})
                 return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -2038,8 +2114,8 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 )
                 return
 
-            screen_locked = self.server.screen_is_locked()
-            if screen_locked and attachments:
+            background_dispatch = self.server.uses_background_execution()
+            if background_dispatch and attachments:
                 self._send_json(
                     HTTPStatus.CONFLICT,
                     {
@@ -2133,7 +2209,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            if screen_locked:
+            if background_dispatch:
                 try:
                     run = self.server.app_server.start_turn(
                         thread_id,
@@ -2271,14 +2347,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                 return
             if len(parts) == 2 and parts[1] == "read":
                 try:
-                    set_codex_thread_unread_state(
-                        self.server.codex_state_path,
-                        thread_id,
-                        False,
-                    )
-                    # Refresh the cached sidebar metadata immediately so the
-                    # next catalog request sees the read state we just wrote.
-                    self.server.project_index()
+                    self.server.mark_thread_read(thread_id, payload)
                 except AppServerError:
                     self._send_json(
                         HTTPStatus.BAD_GATEWAY,
@@ -2413,7 +2482,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                             {"ok": False, "error": "thread_not_interrupted"},
                         )
                         return
-                if self.server.screen_is_locked():
+                if self.server.uses_background_execution():
                     if attachments:
                         self._send_json(
                             HTTPStatus.CONFLICT,
@@ -2575,6 +2644,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
         if self.path == "/api/desktop/request":
             if not self._require_control_auth():
                 return
+            if not self.server.runtime.desktop_control:
+                self.close_connection = True
+                self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "desktop_control_unsupported"})
+                return
             payload = self._read_json()
             if payload is None:
                 return
@@ -2629,6 +2702,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "not_found"})
             return
         if not self._require_control_auth():
+            return
+        if not self.server.runtime.desktop_control:
+            self.close_connection = True
+            self._send_json(HTTPStatus.NOT_IMPLEMENTED, {"error": "desktop_control_unsupported"})
             return
         payload = self._read_json()
         if payload is None:

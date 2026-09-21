@@ -1,5 +1,7 @@
 # Codex Pocket
 
+> Windows 开发预览：见[上手指南](docs/WINDOWS_QUICKSTART.md)和[详细验收记录](docs/WINDOWS_PREVIEW.md)。已初步验证手机配对、原生发送/切换/停止、Project/Recents 新建任务、文本文件读取，以及手机新建 Project 任务并读取图片。推荐托盘入口默认启用新建任务和文件路径模式，独立命令行启动时才需显式开启；附件保留在工作目录 `.codex-pocket-attachments`（不是原生图片卡片）。锁屏/熄屏、原生“继续”和跨版本兼容仍有限制，不安装自启动服务。下方仍是 macOS 安装流程。
+
 [English](README.en.md)
 
 在手机、平板或其他现代浏览器中查看和控制 Mac 上的 Codex Desktop，同时让 Desktop 保持任务的真正执行者。
@@ -126,6 +128,8 @@ zsh scripts/install-local-hotspot-proxy.sh [port]
 ```sh
 python3 scripts/pair-device.py --url https://your-mac.your-tailnet.ts.net
 ```
+
+Windows 预览版使用 `py -3 scripts/pair-device.py --url https://your-pc.your-tailnet.ts.net`。
 
 1. 电脑页面显示二维码和五分钟倒计时；过期后点击“重新生成二维码”。重新生成会让旧码失效。
 2. 手机扫描，在浏览器核对电脑地址，然后点击“确认配对”。仅打开链接不会消耗配对码。

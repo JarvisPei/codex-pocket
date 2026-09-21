@@ -1,5 +1,7 @@
 # Codex Pocket
 
+> Windows developer preview: see the [quick start](docs/WINDOWS_QUICKSTART.en.md) and [detailed acceptance records](docs/WINDOWS_PREVIEW.md). Initial checks cover phone pairing, native Send/switch/Stop, Project/Recents creation, text-file reading, and phone-created Project tasks with image reading. The recommended tray entry enables new tasks and local-file handoff by default; separate CLI startup requires explicit flags. Copies remain in the workspace's `.codex-pocket-attachments` directory (not native image chips). Lock/screen-off, native Resume and cross-version compatibility remain limited. No autostart service is installed. The installation below remains macOS-specific.
+
 [中文](README.md)
 
 View and control Codex Desktop on your Mac from a phone, tablet, or other modern browser while keeping Desktop as the real task owner and execution host.
@@ -110,6 +112,8 @@ For another device, keep Bridge and Tailscale Serve running and run `python3 scr
 ```sh
 python3 scripts/pair-device.py --url https://your-mac.your-tailnet.ts.net
 ```
+
+On the Windows preview, use `py -3 scripts/pair-device.py --url https://your-pc.your-tailnet.ts.net`.
 
 1. The computer shows a QR code with a five-minute countdown. Regenerating invalidates the previous code.
 2. Scan on the phone, check the computer address, and choose **Confirm pairing** (currently labeled “确认配对”). Opening the link alone does not consume the ticket.

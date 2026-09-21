@@ -1,3 +1,42 @@
+let bridgeCapabilities = {
+  platform: "macos", executionMode: "desktop", desktopControl: true, attachments: true,
+};
+
+function applyBridgeCapabilities(value) {
+  if (!value || !["macos", "windows"].includes(value.platform)) return;
+  bridgeCapabilities = {
+    platform: value.platform,
+    executionMode: value.executionMode === "background" ? "background" : "desktop",
+    desktopControl: value.desktopControl === true,
+    attachments: value.attachments === true,
+    attachmentMode: value.attachmentMode === 'localPaths' ? 'localPaths' : 'native',
+    nativeTextSend: value.nativeTextSend === true,
+    nativeReceiptPolling: value.nativeTextSend === true && value.nativeReceiptPolling === true,
+    nativeStop: value.nativeStop === true,
+    nativeResume: value.nativeResume === true,
+    newTasks: value.nativeTextSend === true ? value.newTasks === true : value.newTasks !== false,
+  };
+  document.querySelector("#newTaskExecutionHint").textContent =
+    bridgeCapabilities.nativeTextSend
+      ? (bridgeCapabilities.newTasks
+        ? "Windows 实验性新建：先创建空任务，再由 Desktop 发送首条文字。"
+        : "Windows 原生文字预览：暂不支持新建任务；请打开已有任务发送。")
+      : bridgeCapabilities.executionMode === "background"
+      ? "Windows 预览：纯文本后台执行；Desktop 历史可能需要手动重启才能同步。"
+      : "由电脑上的 Desktop 执行。";
+  document.querySelector("#newTaskAttachmentHint").textContent =
+    bridgeCapabilities.attachments ? (bridgeCapabilities.attachmentMode === 'localPaths'
+      ? "最多 4 个 · 单个 20 MB · 文件会保留在任务工作目录 .codex-pocket-attachments 中，由任务读取；不是原生图片附件"
+      : "最多 4 个 · 单个 20 MB") : "Windows 预览暂不支持附件";
+  elements.attachmentButton.title = bridgeCapabilities.attachmentMode === 'localPaths'
+    ? "上传文件并保留到任务工作目录 .codex-pocket-attachments，发送本机路径（不是原生图片附件）" : "添加附件";
+  updateNewTaskControls();
+}
+
+function hostLabel() {
+  return bridgeCapabilities.platform === "windows" ? "Windows" : "Mac";
+}
+
 const elements = {
   drawerScrim: document.querySelector("#drawerScrim"),
   projectDrawer: document.querySelector("#projectDrawer"),
@@ -175,6 +214,7 @@ let localHotspotStatus = { configured: false, active: false };
 const bridgeLatencySamples = [];
 let threadReadRevisions = loadThreadReadRevisions();
 let isSendingMessage = false;
+const nativeDeliveryNotices = new Map();
 let isUploadingAttachments = false;
 let isCreatingTask = false;
 let isUploadingNewTaskAttachments = false;
@@ -647,7 +687,7 @@ function updateProjectsHint() {
     (thread) => thread.collection !== "project",
   ).length;
   elements.projectsHint.textContent = threads.length
-    ? `${projectCount} 个项目 · ${recentCount} 个最近任务`
+    ? `${projectCount} 个项目 · ${recentCount} 个最近任务${threads.some((thread) => thread.readStateAuthoritative && !thread.readStateAvailable) ? " · 未读状态暂不可用" : ""}`
     : "没有找到持久化任务";
 }
 
@@ -690,6 +730,8 @@ function acknowledgeThreadRead(threadOrId) {
     ? threads.find((candidate) => candidate.id === threadOrId)
     : threadOrId;
   if (!thread?.id) return false;
+  // Native Desktop is authoritative. Merely being foreground is not a receipt.
+  if (thread.readStateAuthoritative) return false;
   const revision = threadCatalogRevision(thread);
   if (!revision) return false;
   const changed = thread.isUnread === true;
@@ -707,6 +749,8 @@ function applyThreadReadReceipts(nextThreads) {
   let receiptsChanged = false;
   for (const thread of nextThreads) {
     if (!thread?.id) continue;
+    // Do not hide a Desktop re-mark-as-unread with a stale local revision.
+    if (thread.readStateAuthoritative) continue;
     const revision = threadCatalogRevision(thread);
     if (!revision) continue;
     if (establishBaseline && thread.isUnread === true) {
@@ -723,6 +767,41 @@ function applyThreadReadReceipts(nextThreads) {
     } catch {
       // A future refresh can safely retry establishing the baseline.
     }
+  }
+}
+
+const desktopReadAcknowledgements = new Map();
+async function acknowledgeDesktopRead(thread) {
+  if (!thread?.readStateAuthoritative || !thread.readStateAvailable || !thread.isUnread
+      || selectedThread?.id !== thread.id || document.visibilityState !== "visible") return;
+  const revision = threadCatalogRevision(thread);
+  const scope = thread.readStateScope;
+  const key = `${thread.id}:${scope}:${revision}`;
+  if (!scope || !revision || (desktopReadAcknowledgements.get(key) || 0) > Date.now()) return;
+  desktopReadAcknowledgements.set(key, Date.now() + 15000);
+  if (desktopReadAcknowledgements.size > 200) {
+    desktopReadAcknowledgements.delete(desktopReadAcknowledgements.keys().next().value);
+  }
+  try {
+    const response = await fetch(`/api/codex/threads/${encodeURIComponent(thread.id)}/read`, {
+      method: "POST", headers: { ...authorizationHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ scope, revision }), cache: "no-store",
+      signal: AbortSignal.timeout(20000),
+    });
+    if (response.status === 401) { handleUnauthorized(); return; }
+    if (!response.ok) throw new Error("read state not confirmed");
+    const result = await response.json();
+    if (result.ok !== true || result.threadId !== thread.id || result.isUnread !== false) {
+      throw new Error("read state not confirmed");
+    }
+    const current = threads.find((t) => t.id === thread.id);
+    if (current?.readStateScope === scope && threadCatalogRevision(current) === revision) {
+      current.isUnread = false;
+      renderProjectGroups();
+    }
+  } catch {
+    // Keep Desktop unread visible, retry on a later successful history load.
+    if (selectedThread?.id === thread.id) elements.threadMeta.textContent = "历史已读取 · 已读状态暂未同步到电脑";
   }
 }
 
@@ -1172,7 +1251,7 @@ function renderComposerAttachments() {
     chip.title = `${attachment.name} · ${formatAttachmentSize(attachment.size)}`;
     const name = document.createElement("span");
     name.className = "attachment-chip-name";
-    name.textContent = attachment.name;
+    name.textContent = attachment.name + (bridgeCapabilities.attachmentMode === 'localPaths' ? ' · 文件路径' : '');
     const remove = document.createElement("button");
     remove.type = "button";
     remove.className = "attachment-chip-remove";
@@ -1372,7 +1451,7 @@ async function saveModelSettings() {
     renderModelSettingsButton();
     elements.modelSettingsDialog.close();
   } catch {
-    elements.modelSettingsError.textContent = "无法连接 Mac，请稍后重试。";
+    elements.modelSettingsError.textContent = "无法连接电脑，请稍后重试。";
   } finally {
     elements.modelSettingsSave.disabled = false;
     elements.modelSettingsCancel.disabled = false;
@@ -1611,12 +1690,12 @@ function updateComposerState() {
   if (!selectedThread) {
     modeText = "只读历史";
   } else if (isSendingMessage) {
-    stateText = "正在由 Mac 启动任务…";
-    modeText = "Mac";
+    stateText = "正在由电脑启动任务…";
+    modeText = hostLabel();
   } else if (isManagedThread) {
     stateText = {
       starting: "正在后台启动任务…",
-      inProgress: "锁屏后台任务运行中 · 点红色按钮可停止",
+      inProgress: "后台任务运行中 · 点红色按钮可停止",
       waitingForInput: "任务正在等待你的确认",
       interrupting: "正在停止后台任务…",
     }[managedRun.status] || "后台任务正在运行";
@@ -1641,11 +1720,25 @@ function updateComposerState() {
       actionIsStop = true;
       actionDisabled = false;
     }
+    if (!bridgeCapabilities.desktopControl && !bridgeCapabilities.nativeStop) {
+      stateText = "任务由其他客户端运行 · 请在原客户端停止";
+      actionDisabled = true;
+    } else if (bridgeCapabilities.nativeStop && selectedThreadLastTurnStatus !== "interrupting") {
+      stateText = '任务正在 Windows 上运行 · 可切换并停止';
+      actionDisabled = !selectedThreadLastTurnId;
+    }
   } else if (isPaused) {
     stateText = "任务已暂停 · 留空可继续，也可输入新指令";
     modeText = `${isDesktopThread ? "Desktop" : "历史"} · 已暂停`;
     actionIsContinue = !hasComposerContent;
     actionDisabled = false;
+    if (bridgeCapabilities.nativeTextSend) {
+      stateText = bridgeCapabilities.nativeResume
+        ? (hasComposerContent ? "请先保存并清空手机草稿，再点继续恢复暂停任务" : "任务已暂停 · 点继续可在 Windows Desktop 恢复")
+        : "原生文字预览暂不支持恢复暂停任务 · 请先在 Windows Desktop 继续";
+      actionIsContinue = bridgeCapabilities.nativeResume && !hasComposerContent;
+      actionDisabled = !actionIsContinue || !selectedThreadLastTurnId;
+    }
   } else if (isComplete) {
     stateText = "任务已完成 · 可以继续发送新指令";
     modeText = `${isDesktopThread ? "Desktop" : "历史"} · 已完成`;
@@ -1666,7 +1759,8 @@ function updateComposerState() {
     }
   }
 
-  elements.composerState.textContent = stateText;
+  elements.composerState.textContent = !isSendingMessage && nativeDeliveryNotices.has(selectedThread?.id)
+    ? nativeDeliveryNotices.get(selectedThread.id) : stateText;
   elements.composerMode.textContent = modeText;
   elements.composerActionButton.classList.toggle("stop", actionIsStop);
   elements.composerActionButton.classList.toggle("continue", actionIsContinue);
@@ -1691,7 +1785,8 @@ function updateComposerState() {
     || modelSettingsLoadingThreadId === selectedThread.id
   );
   elements.attachmentButton.disabled = Boolean(
-    !selectedThread
+    !bridgeCapabilities.attachments
+    || !selectedThread
     || isSendingMessage
     || isUploadingAttachments
     || selectedAttachments().length >= MAX_ATTACHMENTS_PER_TURN
@@ -1861,7 +1956,7 @@ function saveCollapsedProjects() {
 }
 
 function newTaskCreationDisabled() {
-  return isCreatingTask;
+  return isCreatingTask || bridgeCapabilities.newTasks === false;
 }
 
 function createCollectionNewTaskButton(target) {
@@ -1873,7 +1968,7 @@ function createCollectionNewTaskButton(target) {
   const destination = target.projectId ? target.name : "Recents";
   button.setAttribute("aria-label", `在 ${destination} 中新建任务`);
   button.title = newTaskCreationDisabled()
-    ? "正在创建另一个任务"
+    ? (bridgeCapabilities.newTasks === false ? "当前预览暂不支持新建任务" : "正在创建另一个任务")
     : `在 ${destination} 中新建任务`;
   button.addEventListener("click", () => openNewTaskDialog(target));
   return button;
@@ -1882,9 +1977,9 @@ function createCollectionNewTaskButton(target) {
 function updateNewTaskControls() {
   const busy = isCreatingTask || isUploadingNewTaskAttachments;
   elements.newTaskAttachmentButton.disabled = Boolean(
-    busy || newTaskAttachments.length >= MAX_ATTACHMENTS_PER_TURN
+    !bridgeCapabilities.attachments || busy || newTaskAttachments.length >= MAX_ATTACHMENTS_PER_TURN
   );
-  elements.newTaskSubmit.disabled = busy;
+  elements.newTaskSubmit.disabled = busy || bridgeCapabilities.newTasks === false;
   elements.newTaskCancel.disabled = busy;
 }
 
@@ -2025,7 +2120,7 @@ function openNewTaskDialog(target) {
 }
 
 async function createNewTask() {
-  if (!newTaskTarget || isCreatingTask) return;
+  if (!newTaskTarget || isCreatingTask || bridgeCapabilities.newTasks === false) return;
   const message = elements.newTaskMessage.value.trim();
   if (!message && !newTaskAttachments.length) {
     elements.newTaskError.textContent = "请输入第一条指令或添加附件。";
@@ -2045,15 +2140,18 @@ async function createNewTask() {
   }
   isCreatingTask = true;
   updateNewTaskControls();
-  elements.newTaskError.textContent = "正在 Mac 上创建并发送…";
+  elements.newTaskError.textContent = "正在电脑上创建并发送…";
   renderProjectGroups();
   const requestController = new AbortController();
-  const requestTimeout = window.setTimeout(
+  const requestTimeout = bridgeCapabilities.nativeTextSend ? undefined : window.setTimeout(
     () => requestController.abort(),
     newTaskAttachments.length ? 45_000 : 20_000,
   );
   try {
-    const response = await fetch("/api/codex/threads", {
+    if (bridgeCapabilities.nativeTextSend) {
+      body.requestId = await nativeDeliveryRequestId("create", JSON.stringify(body));
+    }
+    const options = {
       method: "POST",
       headers: {
         ...authorizationHeaders(),
@@ -2061,14 +2159,30 @@ async function createNewTask() {
       },
       body: JSON.stringify(body),
       signal: requestController.signal,
-    });
+    };
+    let response, nativeResult;
+    if (bridgeCapabilities.nativeTextSend) {
+      ({ response, result: nativeResult } = await nativeDeliveryResponse("/api/codex/threads", options, 45_000,
+        () => { elements.newTaskError.textContent = "等待 Desktop 回执…正在自动核对，不会重复创建或发送"; }));
+    } else {
+      response = await fetch("/api/codex/threads", options);
+    }
     if (response.status === 401) {
       handleUnauthorized();
       return;
     }
-    const result = await response.json();
+    const result = bridgeCapabilities.nativeTextSend ? nativeResult : await response.json();
     if (!response.ok) {
+      if (bridgeCapabilities.nativeTextSend && result.retryAllowed === true) {
+        sessionStorage.removeItem("pocket-native-delivery:create");
+      }
       if (result.threadCreated && result.threadId) {
+        if (bridgeCapabilities.nativeTextSend) {
+          if (result.retryAllowed === false && result.error === "native_delivery_uncertain") {
+            await nativeDeliveryRequestId(result.threadId, nativeMessageIdentity(message, newTaskAttachments), body.requestId);
+          }
+          sessionStorage.removeItem("pocket-native-delivery:create");
+        }
         if (message) threadDrafts.set(result.threadId, message);
         if (newTaskAttachments.length) {
           threadAttachments.set(result.threadId, [...newTaskAttachments]);
@@ -2092,6 +2206,8 @@ async function createNewTask() {
           });
         }
         const dispatchMessages = {
+          native_delivery_uncertain: "任务已创建，发送结果待确认；草稿已保留，同一条消息重试只核对回执，不会重复点击发送。",
+          project_assignment_failed: "空任务已创建，但 Project/Recents 归属未确认，没有发送。请先在电脑核对归属。",
           desktop_accessibility_unavailable: "空任务已创建，但后台 Helper 的辅助功能授权已失效；请在 Mac 上重新开关授权后重试。",
           desktop_attachment_unconfirmed: "空任务已创建，但 Desktop 没有确认附件；指令和附件已保留，可重试。",
           managed_turn_active: "空任务已创建，但后台任务状态发生冲突；指令已保留，可重试。",
@@ -2102,6 +2218,10 @@ async function createNewTask() {
         return;
       }
       const messages = {
+        native_create_uncertain: "创建结果待确认，已保留本次请求；请先核对电脑任务列表，不要更改内容重复创建。",
+        delivery_confirmation_pending: "之前的创建结果仍未确认，未再次创建；请先核对电脑任务列表。",
+        native_helper_unavailable: "Windows 桌面助手未就绪，没有创建任务。",
+        native_create_refused: "上次创建未通过检查；请检查桌面助手和项目目录后重试。",
         desktop_turn_active: "新任务自身已经开始运行，请刷新列表确认状态。",
         screen_locked_attachments_unsupported: "Mac 已锁屏；后台模式暂时只支持纯文本，请解锁后再发送附件。",
         invalid_project: "这个 Project 已发生变化，请刷新列表。",
@@ -2118,6 +2238,11 @@ async function createNewTask() {
     }
     const createdThread = result.thread;
     if (!createdThread?.id) throw new Error("created thread missing");
+    if (bridgeCapabilities.nativeTextSend && !(result.ok && result.mode === "desktop"
+        && result.desktop?.ok && result.desktop?.confirmedBy === "threadHistory")) {
+      throw new Error("native creation delivery receipt missing");
+    }
+    if (bridgeCapabilities.nativeTextSend) sessionStorage.removeItem("pocket-native-delivery:create");
     threads = [createdThread, ...threads.filter((thread) => thread.id !== createdThread.id)];
     if (sourceEntry?.models && result.settings) {
       modelSettingsCache.set(createdThread.id, {
@@ -2126,19 +2251,23 @@ async function createNewTask() {
         fetchedAt: Date.now(),
       });
     }
-    currentTaskTitle = result.desktop?.taskTitle || createdThread.title;
-    currentStopCandidates = result.mode === "desktop"
-      ? (Number(result.desktop?.stopCandidates) || 1)
-      : 0;
-    desktopStatusKnown = result.mode === "desktop";
-    selectedThreadLastTurnStatus = "inProgress";
-    selectedThreadHasFinalAnswer = false;
-    selectedThreadRuntimeStatus = "active";
-    desktopDispatchState = result.mode === "desktop" ? {
-      threadId: createdThread.id,
-      baselineTurnId: "",
-      startedAt: Date.now(),
-    } : undefined;
+    if (!result.desktop?.duplicateRequest && !result.desktop?.receiptPolled) {
+      currentTaskTitle = result.desktop?.taskTitle || createdThread.title;
+      currentStopCandidates = result.mode === "desktop"
+        ? (Number(result.desktop?.stopCandidates) || 1)
+        : 0;
+      desktopStatusKnown = result.mode === "desktop";
+      selectedThreadLastTurnStatus = "inProgress";
+      selectedThreadHasFinalAnswer = false;
+      selectedThreadRuntimeStatus = "active";
+      desktopDispatchState = result.mode === "desktop" ? {
+        threadId: createdThread.id,
+        baselineTurnId: "",
+        startedAt: Date.now(),
+      } : undefined;
+    } else {
+      desktopDispatchState = undefined;
+    }
     managedRun = result.mode === "background" ? result.run : undefined;
     managedRenderSignature = "";
     localStorage.setItem(SELECTED_THREAD_KEY, createdThread.id);
@@ -2147,12 +2276,14 @@ async function createNewTask() {
     elements.newTaskDialog.close();
     await openThread(createdThread.id, { fresh: true, closeDrawer: true });
     if (result.mode === "background") {
-      setDeviceState("ready", "Mac 在线 · 锁屏后台运行");
+      setDeviceState("ready", `${hostLabel()} 在线 · 后台执行`);
     }
     updateComposerState();
     window.setTimeout(refreshStatus, 600);
   } catch {
-    elements.newTaskError.textContent = "无法连接 Mac，请稍后重试。";
+    elements.newTaskError.textContent = bridgeCapabilities.nativeTextSend
+      ? "创建或发送回执超时，草稿与请求编号已保留；请先核对列表，同样内容重试不会重复创建或发送。"
+      : "无法连接电脑，请稍后重试。";
   } finally {
     window.clearTimeout(requestTimeout);
     isCreatingTask = false;
@@ -3666,6 +3797,80 @@ async function refreshManagedRun(threadId = selectedThread?.id) {
   }
 }
 
+function nativeMessageIdentity(message, attachments = []) {
+  // Retain the previous text-only digest for in-flight requests after upgrade.
+  return attachments.length ? JSON.stringify([message, attachments.map(item => item.id)]) : message;
+}
+
+async function nativeDeliveryRequestId(threadId, message, inheritedId = undefined) {
+  const key = `pocket-native-delivery:${threadId}`;
+  const digest = [...new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(message)))].map((b) => b.toString(16).padStart(2, "0")).join("");
+  let saved;
+  try { saved = JSON.parse(sessionStorage.getItem(key) || "null"); } catch { saved = null; }
+  if (!inheritedId && saved?.digest === digest && typeof saved.id === "string") return saved.id;
+  const id = inheritedId || crypto.randomUUID();
+  // Persist only a digest and ID, not another copy of the user's prompt.
+  sessionStorage.setItem(key, JSON.stringify({ id, digest }));
+  return id;
+}
+
+async function nativeDeliveryResponse(url, options, timeoutMs = 45_000, onPending = () => {}) {
+  // Only servers that explicitly support receiptOnly may be polled. Never
+  // replay ordinary delivery, Resume, or a creation without its durable ID.
+  let payload;
+  try { payload = JSON.parse(options.body); } catch { payload = null; }
+  const canPoll = typeof bridgeCapabilities !== 'undefined' && bridgeCapabilities.nativeReceiptPolling
+    && options.method === 'POST' && typeof payload?.requestId === 'string'
+    && (url === '/api/codex/threads' || /^\/api\/codex\/threads\/[^/]+\/turn$/.test(url));
+  const pendingErrors = new Set(['native_delivery_uncertain', 'native_create_uncertain', 'native_receipt_pending']);
+  const deadline = Date.now() + 90_000;
+  let last, failure;
+  for (let attempt = 0; attempt <= (canPoll ? 8 : 0); attempt++) {
+    if (attempt) {
+      onPending();
+      await new Promise(resolve => window.setTimeout(resolve, Math.min(attempt * 1000, 5000)));
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) break;
+    try {
+      last = await nativeDeliveryAttempt(url, attempt
+        ? { ...options, body: JSON.stringify({ ...payload, receiptOnly: true }) } : options,
+      Math.min(remaining, attempt ? Math.min(timeoutMs, 10_000) : timeoutMs));
+      if (attempt && last.result?.desktop?.confirmedBy === 'threadHistory') {
+        last.result.desktop.receiptPolled = true;
+      }
+      if (last.response.ok || last.response.status === 401 || !pendingErrors.has(last.result?.error)) return last;
+    } catch (error) {
+      failure = error;
+      if (!canPoll) throw error;
+    }
+  }
+  if (last) return last;
+  throw failure || new Error('native_delivery_confirmation_timeout');
+}
+
+async function nativeDeliveryAttempt(url, options, timeoutMs) {
+  const controller = new AbortController();
+  let timer;
+  const deadline = new Promise((_, reject) => {
+    timer = window.setTimeout(() => {
+      controller.abort();
+      reject(new Error("native_delivery_confirmation_timeout"));
+    }, timeoutMs);
+  });
+  try {
+    // Bound both headers AND body. Losing this HTTP response must not cancel
+    // Desktop work or cause a second send; keep the durable request ID instead.
+    return await Promise.race([(async () => {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      const result = response.status === 401 ? null : await response.json();
+      return { response, result };
+    })(), deadline]);
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
 async function startManagedTurn({ continueOnly = false } = {}) {
   if (
     !selectedThread
@@ -3683,10 +3888,22 @@ async function startManagedTurn({ continueOnly = false } = {}) {
   const threadId = selectedThread.id;
   const baselineTurnId = selectedThreadLastTurnId;
   let feedback = "";
+  nativeDeliveryNotices.delete(threadId);
   isSendingMessage = true;
   updateComposerState();
   try {
-    const response = await fetch(
+    const requestId = bridgeCapabilities.nativeTextSend
+      ? await nativeDeliveryRequestId(threadId, continueOnly ? `resume:${baselineTurnId}` : nativeMessageIdentity(message, attachments)) : undefined;
+    let nativeResult;
+    const sendRequest = bridgeCapabilities.nativeTextSend
+      ? async (url, options) => {
+        const received = await nativeDeliveryResponse(url, options, 45_000, () => {
+          if (selectedThread?.id === threadId) elements.composerState.textContent = "等待 Desktop 回执…正在自动核对，不会重复发送";
+        });
+        nativeResult = received.result;
+        return received.response;
+      } : fetch;
+    const response = await sendRequest(
       `/api/codex/threads/${encodeURIComponent(threadId)}/${continueOnly ? "continue" : "turn"}`,
       {
         method: "POST",
@@ -3694,8 +3911,10 @@ async function startManagedTurn({ continueOnly = false } = {}) {
           ...authorizationHeaders(),
           "Content-Type": "application/json",
         },
-        body: JSON.stringify(continueOnly ? {} : {
+        body: JSON.stringify(continueOnly ? (bridgeCapabilities.nativeTextSend
+          ? { requestId, expectedTurnId: baselineTurnId } : {}) : {
           message,
+          ...(requestId ? { requestId } : {}),
           attachmentIds: attachments.map((attachment) => attachment.id),
         }),
       },
@@ -3704,11 +3923,60 @@ async function startManagedTurn({ continueOnly = false } = {}) {
       handleUnauthorized();
       return;
     }
-    const result = await response.json();
+    const result = bridgeCapabilities.nativeTextSend ? nativeResult : await response.json();
     if (!response.ok) {
+      if (bridgeCapabilities.nativeTextSend) {
+        if (result.retryAllowed === true) sessionStorage.removeItem(`pocket-native-delivery:${threadId}`);
+        const known = {
+          native_desktop_draft_present: "Windows 输入框已有草稿，已保留，没有发送",
+          native_desktop_locked_or_unavailable: "Windows 已锁屏或桌面不可用，没有发送",
+          native_desktop_turn_active_or_paused: "Desktop 正在运行或处于暂停状态，没有发送",
+          desktop_turn_active: "任务正在运行，本次没有发送",
+          task_identity_mismatch: "任务名称缺失或重名，无法安全定位，没有发送",
+          native_task_identity_mismatch: "Desktop 当前任务不匹配，没有发送",
+          native_helper_unavailable: "Windows 桌面助手未就绪，没有发送",
+          native_foreground_task_changed: "Windows 未能切到指定任务，没有发送",
+          native_taskbar_input_changed: "电脑正在使用键鼠，已取消任务栏唤起，没有发送；请稍后重试",
+          native_taskbar_input_unavailable: "无法安全操作 Windows 任务栏，没有发送；请手动将 Codex 切到前台",
+          native_taskbar_identity_unavailable: "无法核对 Codex 任务栏图标身份，没有发送",
+          native_taskbar_scan_incomplete: "任务栏读取不完整，没有点击或发送；请手动将 Codex 切到前台",
+          native_taskbar_button_unavailable: "找不到唯一可见的 Codex 任务栏图标，没有发送",
+          native_taskbar_button_changed: "Codex 任务栏图标位置已变化，没有发送；请稍后重试",
+          native_taskbar_button_obscured: "Codex 任务栏图标被遮挡或无法确认，没有发送",
+          native_taskbar_click_unconfirmed: "无法确认任务栏点击结果，没有发送；请手动将 Codex 切到前台",
+          native_taskbar_activation_unconfirmed: "已尝试任务栏唤起，但 Codex 未到前台，没有发送",
+          native_window_restore_unconfirmed: "Windows 未能恢复 Codex 窗口，没有发送；请检查电脑上的 Codex",
+          native_interface_not_ready: "Codex 界面尚未就绪，没有发送；输入已保留，请稍后重试",
+          native_scan_time_limit: "等待 Codex 界面超时，没有发送；输入已保留，请稍后重试",
+          native_scan_provider_unavailable: "Codex 界面正在切换，没有发送；输入已保留，请稍后重试",
+          native_scan_node_limit: "Codex 界面控件过多，无法安全确认输入框，没有发送",
+          native_scan_depth_limit: "Codex 界面结构超出扫描范围，没有发送",
+          native_display_off_security_state_unconfirmed: "Windows 熄屏后的登录/锁屏状态不明确，没有发送；请先解锁",
+          native_preview_existing_text_only: "当前原生预览仅支持在已有任务发送文字",
+          native_resume_preflight_refused: "无法确认同一轮暂停任务或空输入框，没有继续；请检查 Desktop",
+          native_resume_refused: "Desktop 没有通过继续前检查，未再次操作",
+          native_resume_uncertain: "继续结果待确认，请刷新历史，不要重复点击",
+          native_resume_invalid_or_pending: "继续请求仍待确认或任务已变化，请刷新历史",
+          attachments_unsupported: "当前原生预览不支持附件",
+          attachment_handoff_failed: "文件未能安全交给 Desktop，草稿已保留；请检查附件或电脑存储",
+          attachment_not_found: "附件已过期或不可用，请移除后重新上传；若曾发送，请先检查历史避免重复",
+          attachment_not_owned: "附件不属于当前配对设备，请重新上传",
+          invalid_attachments: "附件信息无效，请重新选择",
+        };
+        feedback = known[result.error] || (result.retryAllowed === true
+          ? "Windows 未通过发送前检查，没有发送；请检查桌面状态"
+          : "发送结果待确认，请勿重复发送。可刷新历史，或用同一条消息重试以核对收件（不会再次点击发送）。");
+        return;
+      }
       if (result.error === "desktop_turn_active") {
-        feedback = "Desktop 任务已经在运行；可等待完成或按 Stop";
+        feedback = bridgeCapabilities.desktopControl
+          ? "Desktop 任务已经在运行；可等待完成或按 Stop"
+          : "任务由其他客户端运行；请等待完成或在原客户端停止";
         await refreshStatus();
+        return;
+      }
+      if (result.error === "attachments_unsupported") {
+        feedback = "当前后台预览只支持纯文本，请移除附件后重试";
         return;
       }
       if (result.error === "desktop_draft_present") {
@@ -3792,14 +4060,53 @@ async function startManagedTurn({ continueOnly = false } = {}) {
       }
       throw new Error("managed turn start failed");
     }
+    if (bridgeCapabilities.nativeTextSend) {
+      if (result.ok !== true || result.mode !== "desktop" || result.desktop?.ok !== true
+          || result.desktop.confirmedBy !== "threadHistory") {
+        throw new Error("native_receipt_missing");
+      }
+      if (result.desktop.duplicateRequest === true && !result.desktop.receiptPolled) {
+        // This acknowledges an OLD request, not a newly started turn. Keep
+        // the draft, retire the confirmed ID, and require another explicit tap
+        // for a genuinely new delivery of identical text. Never auto-resend.
+        sessionStorage.removeItem(`pocket-native-delivery:${threadId}`);
+        feedback = continueOnly
+          ? "此前的继续请求已确认，本次没有重复点击；正在核对任务状态。"
+          : "上一条已送达，本次没有再次发送。文字已保留；要新发一条相同内容，请再点发送。";
+        nativeDeliveryNotices.set(threadId, feedback);
+        threadHistoryCache.delete(threadId);
+        window.setTimeout(() => selectedThread?.id === threadId && openThread(threadId, {
+          fresh: true, scroll: false, refreshRun: false,
+          rerenderProjects: false, closeDrawer: false,
+        }), 0);
+        return;
+      }
+    }
+    if (continueOnly && bridgeCapabilities.nativeTextSend) sessionStorage.removeItem(`pocket-native-delivery:${threadId}`);
     if (!continueOnly) {
-      elements.composerInput.value = "";
-      resizeComposer();
+      if (bridgeCapabilities.nativeTextSend) sessionStorage.removeItem(`pocket-native-delivery:${threadId}`);
       threadDrafts.delete(threadId);
       threadAttachments.delete(threadId);
-      renderComposerAttachments();
+      if (selectedThread?.id === threadId) {
+        elements.composerInput.value = "";
+        resizeComposer();
+        renderComposerAttachments();
+      }
     }
     threadHistoryCache.delete(threadId);
+    // A slow response belongs to the submitted task, not whichever task the
+    // reader has since opened. Never clear its draft or navigate back to A.
+    if (selectedThread?.id !== threadId) return;
+    if (result.desktop?.receiptPolled) {
+      feedback = "Desktop 已收到消息";
+      // The turn may already be completed. Read actual history instead of
+      // painting a new running state merely because its receipt arrived late.
+      window.setTimeout(() => selectedThread?.id === threadId && openThread(threadId, {
+        fresh: true, scroll: false, refreshRun: false,
+        rerenderProjects: false, closeDrawer: false,
+      }), 0);
+      return;
+    }
     if (result.mode === "desktop" && result.desktop) {
       managedRun = undefined;
       managedRenderSignature = "";
@@ -3814,9 +4121,9 @@ async function startManagedTurn({ continueOnly = false } = {}) {
         baselineTurnId,
         startedAt: Date.now(),
       };
-      setDeviceState("ready", "Mac 在线 · Desktop 已接管");
+      setDeviceState("ready", `${hostLabel()} 在线 · Desktop 已接管`);
       window.setTimeout(refreshStatus, 500);
-      window.setTimeout(() => openThread(threadId, {
+      window.setTimeout(() => selectedThread?.id === threadId && openThread(threadId, {
         fresh: true,
         scroll: true,
         refreshRun: false,
@@ -3829,13 +4136,23 @@ async function startManagedTurn({ continueOnly = false } = {}) {
       renderManagedRun();
     }
   } catch {
-    feedback = continueOnly
+    feedback = bridgeCapabilities.nativeTextSend
+      ? "收件确认超时或连接中断，结果待确认；已保留消息，请先刷新历史，不要重复发送。"
+      : continueOnly
       ? "继续失败，没有启动任务"
       : "发送失败，没有启动新任务";
+    if (bridgeCapabilities.nativeTextSend) {
+      // Schedule after finally releases the composer. Read-only refresh; no
+      // navigation back to a previous task and no automatic delivery retry.
+      window.setTimeout(() => selectedThread?.id === threadId && openThread(threadId, {
+        fresh: true, scroll: false, refreshRun: false,
+        rerenderProjects: false, closeDrawer: false,
+      }), 0);
+    }
   } finally {
     isSendingMessage = false;
     updateComposerState();
-    if (feedback) elements.composerState.textContent = feedback;
+    if (feedback && selectedThread?.id === threadId) elements.composerState.textContent = feedback;
   }
 }
 
@@ -3888,7 +4205,7 @@ async function openThread(threadId, options = {}) {
   selectedThread = summary;
   const wasUnread = summary.isUnread === true;
   acknowledgeThreadRead(summary);
-  if (wasUnread) {
+  if (wasUnread && !summary.readStateAuthoritative) {
     void fetch(`/api/codex/threads/${encodeURIComponent(threadId)}/read`, {
       method: "POST",
       headers: {
@@ -3959,6 +4276,7 @@ async function openThread(threadId, options = {}) {
   );
   try {
     if (cacheIsFresh && !options.fresh) {
+      void acknowledgeDesktopRead(summary);
       if (options.refreshRun !== false) await refreshManagedRun(threadId);
       return;
     }
@@ -3998,6 +4316,9 @@ async function openThread(threadId, options = {}) {
     rememberThreadDetail(summary, thread, turnLimit, complete);
     if (threadId !== selectedThread?.id) return;
     renderThreadDetail(thread, turnLimit, options);
+    if (String(thread.updatedAt || "") === String(summary.updatedAt || "")) {
+      void acknowledgeDesktopRead(summary);
+    }
     if (options.refreshRun !== false) await refreshManagedRun(threadId);
   } catch {
     elements.threadMeta.textContent = cached
@@ -4115,6 +4436,7 @@ async function refreshStatusOnce() {
     }
     if (!response.ok) throw new Error("status failed");
     const status = await response.json();
+    applyBridgeCapabilities(status.capabilities);
     const previousTitle = currentTaskTitle;
     const previousStopCandidates = currentStopCandidates;
     const previousRequestFingerprint = desktopRequest?.fingerprint || "";
@@ -4170,7 +4492,9 @@ async function refreshStatusOnce() {
     ) {
       desktopActivityEvidence = undefined;
     }
-    setDeviceState("ready", "Mac 在线 · 设备已信任");
+    setDeviceState("ready", bridgeCapabilities.nativeTextSend
+      ? `${hostLabel()} 在线 · 原生文字预览` : bridgeCapabilities.executionMode === "background"
+      ? `${hostLabel()} 在线 · 后台预览` : `${hostLabel()} 在线 · 设备已信任`);
     if (
       threads.length
       && (
@@ -4204,7 +4528,7 @@ async function refreshStatusOnce() {
     desktopRequest = undefined;
     managedRenderSignature = "";
     renderManagedRun();
-    setDeviceState("error", "Mac 状态暂不可用");
+    setDeviceState("error", `${hostLabel()} 状态暂不可用`);
     renderProjectGroups();
     updateComposerState();
   }
@@ -4250,6 +4574,7 @@ async function interruptCurrentTask() {
   if (!selectedThread?.id || !selectedThread.title) return;
   const threadId = selectedThread.id;
   const expectedTaskTitle = selectedThread.title;
+  const expectedTurnId = selectedThreadLastTurnId;
   elements.confirmButton.disabled = true;
   elements.confirmButton.textContent = "正在核对…";
   try {
@@ -4263,9 +4588,27 @@ async function interruptCurrentTask() {
         confirm: true,
         threadId,
         expectedTaskTitle,
+        ...(bridgeCapabilities.nativeStop ? { expectedTurnId } : {}),
       }),
     });
     const result = await response.json();
+    if (selectedThread?.id !== threadId) {
+      elements.stopDialog.close();
+      return;
+    }
+    if (bridgeCapabilities.nativeStop && result.alreadyFinished) {
+      elements.stopDialog.close();
+      await openThread(threadId, {fresh: true, scroll: false});
+      elements.composerState.textContent = '该轮任务已经结束，无需停止';
+      return;
+    }
+    if (bridgeCapabilities.nativeStop && !response.ok) {
+      elements.stopDialog.close();
+      elements.composerState.textContent = result.error === 'native_stop_uncertain'
+        ? '停止结果待确认，请刷新历史；不会自动重复点击停止'
+        : '未通过停止校验，未执行停止；请核对 Windows 是否解锁及任务状态';
+      return;
+    }
     if (response.ok && result.interrupted) {
       elements.stopDialog.close();
       currentTaskTitle = expectedTaskTitle;
@@ -4313,7 +4656,11 @@ async function interruptCurrentTask() {
     }
     throw new Error("interrupt refused");
   } catch {
-    elements.composerState.textContent = "停止请求失败，没有执行操作";
+    if (selectedThread?.id === threadId) {
+      elements.composerState.textContent = bridgeCapabilities.nativeStop
+        ? '连接中断，停止结果待确认；请刷新历史，不会自动重复点击'
+        : '停止请求失败，没有执行操作';
+    }
   } finally {
     elements.confirmButton.disabled = false;
     elements.confirmButton.textContent = "确认停止";
@@ -4380,7 +4727,7 @@ elements.modelSettingsForm.addEventListener("submit", (event) => {
 elements.composerActionButton.addEventListener("click", () => {
   if (elements.composerActionButton.classList.contains("stop")) {
     if (managedRunIsActive() && managedRun?.threadId === selectedThread?.id) {
-      elements.composerState.textContent = "正在向 Mac 发送停止请求…";
+      elements.composerState.textContent = "正在向电脑发送停止请求…";
       interruptManagedTurn();
       return;
     }
@@ -4397,6 +4744,7 @@ elements.composerActionButton.addEventListener("click", () => {
 });
 elements.composerInput.addEventListener("input", () => {
   if (selectedThread?.id) {
+    nativeDeliveryNotices.delete(selectedThread.id);
     threadDrafts.set(selectedThread.id, elements.composerInput.value);
   }
   resizeComposer();

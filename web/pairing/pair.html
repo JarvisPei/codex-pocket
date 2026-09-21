@@ -4,7 +4,7 @@
 <p>电脑和手机保持 Tailscale 在线。用手机相机扫描，再在手机上点击“确认配对”。</p>
 <p id="origin"></p><canvas id="qr" width="320" height="320" aria-label="一次性配对二维码" hidden></canvas>
 <p id="status" role="status" aria-live="polite">正在连接本机 Bridge…</p>
-<section id="setup" hidden><p>尚未找到指向本机 Bridge 的私有 HTTPS 入口。请先让电脑和手机登录同一个 Tailscale 网络，然后在电脑终端运行：</p><p><code id="serveCommand">tailscale serve --bg http://127.0.0.1:4317</code></p><p>如提示授权，请按 Tailscale 指引完成，再点击下方按钮。这里不会自动修改网络配置，也不会启用公网 Funnel。使用自定义地址时，可手动运行 <code>python3 scripts/pair-device.py --url https://你的地址</code>。</p></section>
+<section id="setup" hidden><p>尚未找到指向本机 Bridge 的私有 HTTPS 入口。请先让电脑和手机登录同一个 Tailscale 网络，然后在电脑终端运行：</p><p><code id="serveCommand">tailscale serve --bg http://127.0.0.1:4317</code></p><p>如提示授权，请按 Tailscale 指引完成，再点击下方按钮。这里不会自动修改网络配置，也不会启用公网 Funnel。使用自定义地址时，可手动运行 <code>python3 scripts/pair-device.py --url https://你的地址</code>（Windows 使用 <code>py -3</code>）。</p></section>
 <button id="renew" type="button">生成配对二维码</button>
 <details><summary>扫码不方便？手动输入配对码</summary><p>手机打开下面的地址，在“配对信息”中粘贴配对码。请不要在电脑浏览器使用该码。</p><a id="address" target="_blank" rel="noreferrer"></a><p><code id="code"></code></p><button id="copy" type="button" disabled>复制配对码</button></details>
 <p class="note">二维码仅本地生成，不会上传给第三方。配对码五分钟有效、只能使用一次；配对后浏览器会记住设备。请勿截图转发。</p>

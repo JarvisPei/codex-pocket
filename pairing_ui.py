@@ -50,7 +50,9 @@ def origin_from_serve(config, port):
 def discover_origin(port):
     executable = shutil.which('tailscale')
     if not executable:
-        known = Path('/Applications/Tailscale.app/Contents/MacOS/Tailscale')
+        known = (Path('/Applications/Tailscale.app/Contents/MacOS/Tailscale')
+                 if sys.platform == 'darwin' else
+                 Path(os.environ.get('ProgramFiles', r'C:\Program Files')) / 'Tailscale/tailscale.exe')
         if known.is_file():
             executable = str(known)
     if not executable:
@@ -69,7 +71,10 @@ def discover_origin(port):
 def launch_pairing_display(port=4317):
     """One-shot installer hook, never a login/startup registration."""
     options = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    options['start_new_session'] = True
+    if sys.platform == 'win32':
+        options['creationflags'] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options['start_new_session'] = True
     return subprocess.Popen([sys.executable, str(ROOT / 'scripts/pair-device.py'),
         '--port', str(port), '--wait-ready', '30'], **options)
 
@@ -226,14 +231,17 @@ def main(argv=None):
             print('First-install pairing page scheduled. If it does not open, run scripts/pair-device.py manually.')
             return 0
         wait_for_bridge(args.port, args.wait_ready)
-        if sys.platform == 'darwin':
+        if sys.platform == 'win32':
+            from windows_bridge import windows_token
+            token = windows_token()
+        elif sys.platform == 'darwin':
             result = subprocess.run(['/usr/bin/security', 'find-generic-password', '-w', '-s',
                 'mobile-codex-bridge', '-a', os.environ.get('USER', '')], capture_output=True, text=True, timeout=8)
             if result.returncode or len(result.stdout.strip()) < 32:
                 raise RuntimeError('Cannot read Bridge credential from Keychain.')
             token = result.stdout.strip()
         else:
-            raise RuntimeError('Run on the Mac hosting the Bridge.')
+            raise RuntimeError('Run on the Mac or Windows computer hosting the Bridge.')
         server = PairingDisplay(origin, token, args.port)
     except (ValueError, RuntimeError, OSError) as error:
         parser.exit(1, f'{error}\n')

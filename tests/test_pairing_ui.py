@@ -1,6 +1,7 @@
 import http.client
 import json
 from pathlib import Path
+import tempfile
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -150,6 +151,29 @@ class FirstInstallTest(unittest.TestCase):
         self.assertEqual(command[-4:], ['--port', '5432', '--wait-ready', '30'])
         self.assertNotIn('--url', command)
         self.assertIsNotNone(popen.call_args.kwargs['stdout'])
+
+    def test_windows_hook_only_runs_once_and_keeps_pending_on_failure(self):
+        from windows_bridge import open_first_install_pairing
+        with tempfile.TemporaryDirectory() as directory, patch('windows_bridge.state_directory', return_value=Path(directory)), patch('pairing_ui.launch_pairing_display') as launch:
+            marker = Path(directory) / 'first-pairing.pending'
+            open_first_install_pairing(); launch.assert_not_called()
+            marker.touch()
+            launch.side_effect = OSError('test')
+            open_first_install_pairing(); self.assertTrue(marker.exists())
+            launch.side_effect = None
+            open_first_install_pairing(); self.assertFalse(marker.exists())
+            open_first_install_pairing(); self.assertEqual(launch.call_count, 2)
+
+    def test_windows_init_marks_only_new_installations(self):
+        import windows_bridge
+        with tempfile.TemporaryDirectory() as directory, patch('windows_bridge.sys.platform', 'win32'), patch('windows_bridge.state_directory', return_value=Path(directory)), patch('windows_bridge.windows_token'):
+            marker = Path(directory) / 'first-pairing.pending'
+            self.assertEqual(windows_bridge.main(['init']), 0)
+            self.assertTrue(marker.exists())
+            marker.unlink()
+            (Path(directory) / 'token.dpapi').touch()
+            self.assertEqual(windows_bridge.main(['init']), 0)
+            self.assertFalse(marker.exists())
 
     def test_mac_hook_is_installer_only(self):
         root = Path(__file__).resolve().parents[1]
