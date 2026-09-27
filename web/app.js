@@ -238,6 +238,8 @@ const persistedManagedTurnIds = new Set();
 const threadDrafts = new Map();
 const threadAttachments = new Map();
 const threadHistoryCache = new Map();
+const historyRequestVersions = new Map();
+const olderHistoryLoading = new Set();
 const renderedThreadSignatures = new Map();
 let renderedThreadId = "";
 const modelSettingsCache = new Map();
@@ -3162,6 +3164,7 @@ function persistSessionThreadDetail(entry) {
     if (retainedTurns.length !== turns.length) {
       complete = false;
       delete thread.historyCursor;
+      delete thread.historyNextCursor;
     }
     serialized = JSON.stringify({
       version: 1,
@@ -3205,7 +3208,20 @@ function rememberThreadDetail(summary, thread, turnLimit, complete = true) {
 
 function mergeIncrementalThreadDetail(cached, incoming) {
   const delta = incoming?.historyDelta;
-  if (!delta) return { thread: incoming, complete: true };
+  if (!delta) {
+    if (incoming?.historyPaged && cached?.complete !== false && cached?.thread?.historyPaged) {
+      const previous = cached.thread.turns || [];
+      const firstId = incoming.turns?.[0]?.id;
+      const overlap = previous.findIndex((turn) => turn.id === firstId);
+      if (overlap > 0) return { thread: {
+        ...incoming,
+        turns: [...previous.slice(0, overlap), ...incoming.turns],
+        historyNextCursor: cached.thread.historyNextCursor,
+        historyTruncated: cached.thread.historyTruncated,
+      }, complete: true };
+    }
+    return { thread: incoming, complete: true };
+  }
   if (!cached?.thread || cached.complete === false) return undefined;
   const existingTurns = Array.isArray(cached.thread.turns)
     ? cached.thread.turns
@@ -3222,10 +3238,58 @@ function mergeIncrementalThreadDetail(cached, incoming) {
   const thread = {
     ...cached.thread,
     ...incoming,
-    turns: mergedTurns.slice(-historyLimit),
+    turns: incoming.historyPaged ? mergedTurns : mergedTurns.slice(-historyLimit),
   };
+  if (incoming.historyPaged && cached.thread.historyPaged) {
+    thread.historyNextCursor = cached.thread.historyNextCursor;
+    thread.historyTruncated = cached.thread.historyTruncated;
+  }
   delete thread.historyDelta;
   return { thread, complete: true };
+}
+
+function prependHistoryPage(current, older) {
+  const existing = new Set((current.turns || []).map((turn) => turn.id));
+  return {
+    ...current,
+    turns: [...(older.turns || []).filter((turn) => !existing.has(turn.id)), ...(current.turns || [])],
+    historyNextCursor: older.historyNextCursor,
+    historyTruncated: older.historyTruncated,
+  };
+}
+
+async function loadOlderHistory(threadId) {
+  const cached = threadHistoryCache.get(threadId);
+  const cursor = cached?.thread?.historyNextCursor;
+  if (!cursor || olderHistoryLoading.has(threadId)) return;
+  olderHistoryLoading.add(threadId);
+  if (selectedThread?.id === threadId) renderHistoryNotice(cached.thread, cached.turnLimit);
+  try {
+    const query = new URLSearchParams({ turns: String(INITIAL_HISTORY_TURNS), historyBefore: cursor });
+    const response = await fetch(`/api/codex/threads/${encodeURIComponent(threadId)}?${query}`, {
+      headers: authorizationHeaders(), cache: "no-store",
+    });
+    if (response.status === 401) { handleUnauthorized(); return; }
+    if (!response.ok) throw new Error("older history read failed");
+    const older = (await response.json()).thread;
+    const latest = threadHistoryCache.get(threadId);
+    if (!older?.historyPaged || !latest || latest.thread.historyNextCursor !== cursor) return;
+    const thread = prependHistoryPage(latest.thread, older);
+    const summary = threads.find((candidate) => candidate.id === threadId);
+    if (!summary) return;
+    rememberThreadDetail(summary, thread, thread.turns.length);
+    if (selectedThread?.id === threadId) {
+      renderThreadDetail(thread, thread.turns.length, { scroll: false, preservePosition: true });
+    }
+  } catch {
+    if (selectedThread?.id === threadId) {
+      elements.threadMeta.textContent = "更早历史暂时无法加载 · 已有内容保留，可重试";
+    }
+  } finally {
+    olderHistoryLoading.delete(threadId);
+    const latest = threadHistoryCache.get(threadId);
+    if (selectedThread?.id === threadId && latest) renderHistoryNotice(latest.thread, latest.turnLimit);
+  }
 }
 
 function renderHistoryNotice(thread, turnLimit) {
@@ -3235,16 +3299,17 @@ function renderHistoryNotice(thread, turnLimit) {
     return;
   }
   const totalTurns = Number(thread.totalTurns) || (thread.turns || []).length;
-  if (totalTurns <= turnLimit) return;
+  if (thread.historyPaged ? !thread.historyNextCursor : totalTurns <= turnLimit) return;
   const text = document.createElement("span");
-  text.textContent = `为保证移动端速度，先显示最近 ${turnLimit} 个 turn。`;
+  text.textContent = `已显示最近 ${(thread.turns || []).length} 个 turn。`;
   elements.historyNotice.append(text);
-  if (turnLimit >= MAX_HISTORY_TURNS) return;
+  if (!thread.historyPaged && turnLimit >= MAX_HISTORY_TURNS) return;
   const loadOlder = document.createElement("button");
   loadOlder.type = "button";
   loadOlder.className = "history-load-more";
-  loadOlder.textContent = "加载更早历史";
-  loadOlder.addEventListener("click", () => openThread(thread.id, {
+  loadOlder.disabled = olderHistoryLoading.has(thread.id);
+  loadOlder.textContent = loadOlder.disabled ? "正在加载更早历史…" : "加载更早历史";
+  loadOlder.addEventListener("click", () => thread.historyPaged ? loadOlderHistory(thread.id) : openThread(thread.id, {
     turnLimit: MAX_HISTORY_TURNS,
     scroll: false,
     preservePosition: true,
@@ -4245,7 +4310,8 @@ async function openThread(threadId, options = {}) {
   if (cached) {
     renderThreadDetail(
       cached.thread,
-      Math.min(turnLimit, Math.max(1, Number(cached.turnLimit) || turnLimit)),
+      cached.thread.historyPaged ? cached.thread.turns.length
+        : Math.min(turnLimit, Math.max(1, Number(cached.turnLimit) || turnLimit)),
       options,
     );
   } else {
@@ -4302,25 +4368,31 @@ async function openThread(threadId, options = {}) {
       if (!response.ok) throw new Error("thread read failed");
       return (await response.json()).thread;
     };
+    const requestVersion = (historyRequestVersions.get(threadId) || 0) + 1;
+    historyRequestVersions.set(threadId, requestVersion);
     let incoming = await fetchDetail();
     if (!incoming) return;
-    let merged = mergeIncrementalThreadDetail(cached, incoming);
+    if (historyRequestVersions.get(threadId) !== requestVersion) return;
+    let merged = mergeIncrementalThreadDetail(threadHistoryCache.get(threadId) || cached, incoming);
     if (!merged) {
       query.delete("tailTurnId");
       query.delete("tailRevision");
       incoming = await fetchDetail();
       if (!incoming) return;
+      if (historyRequestVersions.get(threadId) !== requestVersion) return;
       merged = mergeIncrementalThreadDetail(undefined, incoming);
     }
     const { thread, complete } = merged;
-    rememberThreadDetail(summary, thread, turnLimit, complete);
+    const displayLimit = thread.historyPaged ? Math.max(1, thread.turns.length) : turnLimit;
+    rememberThreadDetail(summary, thread, displayLimit, complete);
     if (threadId !== selectedThread?.id) return;
-    renderThreadDetail(thread, turnLimit, options);
+    renderThreadDetail(thread, displayLimit, options);
     if (String(thread.updatedAt || "") === String(summary.updatedAt || "")) {
       void acknowledgeDesktopRead(summary);
     }
     if (options.refreshRun !== false) await refreshManagedRun(threadId);
   } catch {
+    if (threadId !== selectedThread?.id) return;
     elements.threadMeta.textContent = cached
       ? "已显示缓存历史 · 暂时无法刷新"
       : "无法读取任务，请稍后重试。";

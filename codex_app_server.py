@@ -33,6 +33,10 @@ class AppServerError(RuntimeError):
 class AppServerRejected(AppServerError):
     """A definite RPC rejection, unlike a transport failure/unknown outcome."""
 
+    def __init__(self, message: str, code: Optional[int] = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class ManagedTurnConflict(AppServerError):
     pass
@@ -65,6 +69,7 @@ class CodexAppServerClient:
         self._settings_overrides: dict[str, dict[str, Any]] = {}
         self._retire_when_idle = False
         self._retirement: Optional[threading.Thread] = None
+        self._history_paging_supported: Optional[bool] = None
 
     def start(self) -> None:
         if self._process is not None:
@@ -413,7 +418,10 @@ class CodexAppServerClient:
                 if isinstance(error_payload, dict)
                 else "request failed"
             )
-            raise AppServerRejected(f"Codex app-server rejected {method}: {detail}")
+            raise AppServerRejected(
+                f"Codex app-server rejected {method}: {detail}",
+                error_payload.get("code") if isinstance(error_payload, dict) else None,
+            )
         if "transportError" in response:
             raise AppServerError(str(response["transportError"]))
         result = response.get("result")
@@ -444,6 +452,51 @@ class CodexAppServerClient:
             "model/list",
             {"limit": 100, "includeHidden": False},
         )
+
+    def read_thread_page(
+        self, thread_id: str, limit: int = 30, cursor: Optional[str] = None,
+    ) -> dict[str, Any]:
+        """Read persisted display history, never resume or subscribe to a task.
+
+        Older binaries retain the legacy route only after an explicit unsupported
+        method response. A timeout must not trigger a second, full-history read.
+        """
+        limit = min(60, max(1, limit))
+        if self._history_paging_supported is not False:
+            params: dict[str, Any] = {
+                "threadId": thread_id, "limit": limit,
+                "sortDirection": "desc", "itemsView": "full",
+            }
+            if cursor:
+                params["cursor"] = cursor
+            try:
+                page = self.request("thread/turns/list", params, timeout=12)
+            except AppServerRejected as error:
+                if error.code != -32601:
+                    raise
+                self._history_paging_supported = False
+            else:
+                data = page.get("data")
+                next_cursor = page.get("nextCursor")
+                if (not isinstance(data, list) or len(data) > limit
+                        or any(not isinstance(turn, dict) or not isinstance(turn.get("id"), str)
+                               or not isinstance(turn.get("items"), list) for turn in data)
+                        or (next_cursor is not None and not isinstance(next_cursor, str))):
+                    raise AppServerError("Invalid history page.")
+                self._history_paging_supported = True
+                metadata = self.request("thread/read", {
+                    "threadId": thread_id, "includeTurns": False,
+                }, timeout=8)
+                thread = metadata.get("thread")
+                if not isinstance(thread, dict) or thread.get("id") != thread_id:
+                    raise AppServerError("Invalid history metadata.")
+                return {"thread": {
+                    **thread, "turns": list(reversed(data)),
+                    "_historyPage": {"nextCursor": next_cursor, "older": bool(cursor)},
+                }}
+        if cursor:
+            raise AppServerError("History pagination is unavailable on this Codex version.")
+        return self.read_thread(thread_id)
 
     def read_rate_limits(self) -> dict[str, Any]:
         return self.request("account/rateLimits/read", {})
@@ -1495,7 +1548,10 @@ def summarize_thread_detail(
 ) -> dict[str, Any]:
     turns = thread.get("turns")
     rollout_snapshot = _rollout_activity_snapshot(thread)
-    rollout_activities = rollout_snapshot["turns"]
+    page = thread.get("_historyPage")
+    # Native full-item pages already contain ordered activity. Don't add the
+    # legacy per-turn aggregates again or move them across commentary messages.
+    rollout_activities = {} if isinstance(page, dict) else rollout_snapshot["turns"]
     safe_turns = []
     turn_limit = min(60, max(1, max_turns))
     if isinstance(turns, list):
@@ -1576,7 +1632,8 @@ def summarize_thread_detail(
                 }
             )
     active_turn_id = str(rollout_snapshot["activeTurnId"] or "")
-    if active_turn_id and not any(turn["id"] == active_turn_id for turn in safe_turns):
+    if (active_turn_id and not (isinstance(page, dict) and page.get("older"))
+            and not any(turn["id"] == active_turn_id for turn in safe_turns)):
         active_items = [
             {
                 "id": f"rollout-{active_turn_id}-{kind}",
@@ -1613,4 +1670,10 @@ def summarize_thread_detail(
     result["historyTruncated"] = (
         isinstance(turns, list) and len(turns) > turn_limit
     )
+    if isinstance(page, dict):
+        result["historyPaged"] = True
+        result["historyNextCursor"] = page.get("nextCursor")
+        result["historyTruncated"] = bool(page.get("nextCursor"))
+        # Pagination does not report a total; don't mislabel page size as total.
+        result["totalTurns"] = None
     return result

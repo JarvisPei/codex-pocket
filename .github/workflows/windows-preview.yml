@@ -61,6 +61,8 @@ jobs:
         run: python -m unittest discover -s tests/windows -p test_windows_doctor.py
       - name: Reader and per-turn writer lifecycle tests
         run: python -m unittest discover -s tests -p test_app_server_lifecycle.py
+      - name: Read-only history pagination and tail refresh
+        run: python -m unittest discover -s tests -p test_history_paging.py
       - name: Restricted desktop diagnostic mailbox
         run: python -m unittest discover -s tests/windows -p test_windows_desktop_helper.py
       - name: Read-only composer classification
@@ -90,7 +92,7 @@ jobs:
       - name: Two-phase native Continue guards and idempotency (fake UI)
         run: python -m unittest discover -s tests/windows -p "test_windows_resume*.py"
       - name: Browser capability behavior
-        run: node --test tests/test_web_capabilities.cjs tests/test_web_pairing.cjs tests/test_web_read_state.cjs
+        run: node --test tests/test_web_capabilities.cjs tests/test_web_pairing.cjs tests/test_web_read_state.cjs tests/test_web_history.cjs
       - name: Local QR pairing and single-use tickets
         run: python -m unittest discover -s tests -p test_pairing_ui.py
       - name: Browser syntax

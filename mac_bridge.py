@@ -300,6 +300,21 @@ def read_local_hotspot_status(
     }
 
 
+def read_thread_tail(app_server: CodexAppServerClient, thread_id: str) -> dict[str, Any]:
+    """Bounded, uncached state for send guards and receipt confirmation.
+
+    Unlike display caches this must be a fresh native read. Keep a few turns
+    so a just-started turn doesn't hide the preceding message during delivery.
+    """
+    page_reader = getattr(app_server, "read_thread_page", None)
+    result = (page_reader(thread_id, 5, None) if callable(page_reader)
+              else app_server.read_thread(thread_id))
+    thread = result.get("thread")
+    if not isinstance(thread, dict) or not isinstance(thread.get("turns"), list):
+        raise AppServerError("Invalid thread tail.")
+    return thread
+
+
 def thread_user_message_fingerprints(thread: dict[str, Any]) -> set[str]:
     fingerprints: set[str] = set()
     turns = thread.get("turns")
@@ -340,8 +355,7 @@ def desktop_message_landed(
     expected = expected_message.strip()
     for attempt in range(attempts):
         try:
-            result = app_server.read_thread(thread_id)
-            thread = result.get("thread")
+            thread = read_thread_tail(app_server, thread_id)
         except AppServerError:
             thread = None
         if isinstance(thread, dict):
@@ -1320,7 +1334,7 @@ class BridgeServer(ThreadingHTTPServer):
         self._project_index = load_codex_project_index(self.codex_state_path)
         self._project_index_shrink_seen_at: Optional[float] = None
         self._thread_detail_cache: OrderedDict[
-            tuple[str, str, int], tuple[float, dict[str, Any]]
+            tuple[str, str, int, str], tuple[float, dict[str, Any]]
         ] = OrderedDict()
         self._thread_detail_cache_lock = threading.RLock()
         super().__init__(address, BridgeHandler)
@@ -1373,8 +1387,9 @@ class BridgeServer(ThreadingHTTPServer):
         thread_id: str,
         revision: str,
         turn_limit: int,
+        history_cursor: str = "",
     ) -> Optional[dict[str, Any]]:
-        key = (thread_id, revision, turn_limit)
+        key = (thread_id, revision, turn_limit, history_cursor)
         with self._thread_detail_cache_lock:
             cached = self._thread_detail_cache.get(key)
             if cached is None:
@@ -1392,8 +1407,9 @@ class BridgeServer(ThreadingHTTPServer):
         revision: str,
         turn_limit: int,
         detail: dict[str, Any],
+        history_cursor: str = "",
     ) -> None:
-        key = (thread_id, revision, turn_limit)
+        key = (thread_id, revision, turn_limit, history_cursor)
         with self._thread_detail_cache_lock:
             self._thread_detail_cache[key] = (time.monotonic(), detail)
             self._thread_detail_cache.move_to_end(key)
@@ -1837,18 +1853,37 @@ class BridgeHandler(BaseHTTPRequestHandler):
             force_fresh = query.get("fresh", ["0"])[0] == "1"
             tail_turn_id = str(query.get("tailTurnId", [""])[0])[:128]
             tail_revision = str(query.get("tailRevision", [""])[0])[:64].lower()
+            history_cursor = query.get("historyBefore", [""])[0]
+            if len(history_cursor) > 4096:
+                self._send_json(HTTPStatus.BAD_REQUEST, {"error": "invalid_history_cursor"})
+                return
+            tail_only = bool(not history_cursor and tail_turn_id and re.fullmatch(r"[0-9a-f]{64}", tail_revision))
+            cache_cursor = history_cursor or ("tail:" + tail_turn_id if tail_only else "")
             detail = None if force_fresh else self.server.cached_thread_detail(
                 thread_id,
                 revision,
                 turn_limit,
+                cache_cursor,
             )
             if detail is None:
                 try:
-                    result = self.server.app_server.read_thread(thread_id)
+                    page_reader = getattr(self.server.app_server, "read_thread_page", None)
+                    result = (page_reader(thread_id, 1 if tail_only else turn_limit, history_cursor or None)
+                              if callable(page_reader) else self.server.app_server.read_thread(thread_id))
                     thread = result.get("thread")
                     if not isinstance(thread, dict):
                         raise AppServerError("Invalid thread.")
-                except AppServerError:
+                    if (tail_only and callable(page_reader) and isinstance(thread.get("_historyPage"), dict)
+                            and not any(turn.get("id") == tail_turn_id for turn in thread.get("turns", []))):
+                        # A new turn arrived: fetch a bounded window to bridge the
+                        # client's tail. If it no longer overlaps, return a reset.
+                        result = page_reader(thread_id, turn_limit, None)
+                        thread = result.get("thread")
+                        if not isinstance(thread, dict):
+                            raise AppServerError("Invalid thread.")
+                except AppServerError as error:
+                    # Metadata-only diagnostics, never log prompts or raw RPC errors.
+                    print("History read failed: " + type(error).__name__, file=sys.stderr, flush=True)
                     self._send_json(
                         HTTPStatus.BAD_GATEWAY,
                         {"ok": False, "error": "codex_app_server_failed"},
@@ -1864,11 +1899,12 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     revision,
                     turn_limit,
                     detail,
+                    cache_cursor,
                 )
             response_detail = incremental_thread_detail(
                 detail,
-                tail_turn_id,
-                tail_revision,
+                "" if history_cursor else tail_turn_id,
+                "" if history_cursor else tail_revision,
             )
             self._send_json(
                 HTTPStatus.OK,
@@ -2385,10 +2421,7 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     )
                     return
                 try:
-                    thread_result = self.server.app_server.read_thread(thread_id)
-                    thread = thread_result.get("thread")
-                    if not isinstance(thread, dict):
-                        raise AppServerError("Invalid thread.")
+                    thread = read_thread_tail(self.server.app_server, thread_id)
                     turns = thread.get("turns")
                     last_turn = turns[-1] if isinstance(turns, list) and turns else None
                     if isinstance(last_turn, dict) and last_turn.get("status") in {
@@ -2459,12 +2492,10 @@ class BridgeHandler(BaseHTTPRequestHandler):
                         )
                         return
                 try:
-                    thread_result = self.server.app_server.read_thread(thread_id)
-                    thread = thread_result.get("thread")
-                    if not isinstance(thread, dict):
-                        raise AppServerError("Invalid thread.")
+                    thread = read_thread_tail(self.server.app_server, thread_id)
                     summary = summarize_thread(thread)
-                except AppServerError:
+                except AppServerError as error:
+                    print("Send preflight failed: " + type(error).__name__, file=sys.stderr, flush=True)
                     self._send_json(
                         HTTPStatus.BAD_GATEWAY,
                         {"ok": False, "error": "codex_thread_unavailable"},
