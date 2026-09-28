@@ -58,6 +58,42 @@ LOCAL_HOTSPOT_CONFIG_PATH = LOCAL_HOTSPOT_STATE_DIR / "local-hotspot.json"
 LOCAL_HOTSPOT_CA_PATH = LOCAL_HOTSPOT_STATE_DIR / "local-hotspot-tls" / "local-ca.cer"
 
 
+def resolve_macos_codex_binary(
+    explicit: Optional[Path] = None,
+    *,
+    app_roots: Optional[list[Path]] = None,
+) -> Path:
+    """Find the Desktop-bundled CLI, never an unrelated executable on PATH."""
+    if explicit is not None:
+        candidate = explicit.expanduser().resolve()
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            raise ValueError("The --codex-binary path is not an executable file.")
+        return candidate
+    if app_roots is None:
+        app_roots = [
+            directory / name
+            for directory in (Path("/Applications"), Path.home() / "Applications")
+            for name in ("ChatGPT.app", "Codex.app")
+        ]
+    matches: list[Path] = []
+    for app in app_roots:
+        # September 2026 builds moved the CLI into a nested signed app.
+        for relative in (
+            "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            "Contents/Resources/codex",
+        ):
+            candidate = (app / relative).resolve()
+            if candidate.is_file() and os.access(candidate, os.X_OK):
+                if candidate not in matches:
+                    matches.append(candidate)
+                break
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise ValueError("Multiple Codex Desktop installations found; select one with --codex-binary.")
+    raise ValueError("Codex Desktop CLI not found; install Desktop or specify --codex-binary.")
+
+
 def utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -1152,14 +1188,24 @@ class DesktopController:
             separators=(",", ":"),
         )
         with self._interrupt_lock:
-            result = self._run("--desktop-send", input_text=payload)
-            if result.returncode in {28, 43} and attachment_paths:
-                # Attaching a preview briefly replaces the Electron composer
-                # text area. Some image previews also become observable only
-                # after Electron finishes its asynchronous layout pass. A
-                # bounded retry reuses the attachment after the UI settles.
-                time.sleep(3.0)
+            try:
                 result = self._run("--desktop-send", input_text=payload)
+                if result.returncode in {28, 43} and attachment_paths:
+                    # Retry only explicit pre-submission failures, never an
+                    # unknown outcome after the helper exceeded its deadline.
+                    time.sleep(3.0)
+                    result = self._run("--desktop-send", input_text=payload)
+            except subprocess.TimeoutExpired as error:
+                detail = error.stderr or ""
+                if isinstance(detail, bytes):
+                    detail = detail.decode("utf-8", errors="replace")
+                stages = re.findall(r"desktop-send stage=([a-z-]+)", detail)
+                stage = stages[-1] if stages else "unknown"
+                raise DesktopDispatchError(
+                    "desktop_send_unconfirmed",
+                    f"Desktop helper timed out; last stage={stage}. "
+                    "Submission outcome unknown; not retrying or clearing the draft.",
+                ) from error
         if result.returncode != 0:
             reasons = {
                 2: "desktop_accessibility_unavailable",
@@ -1932,9 +1978,14 @@ class BridgeHandler(BaseHTTPRequestHandler):
                     file=sys.stderr,
                     flush=True,
                 )
+                reason = "probe_failed"
+                if isinstance(error, TaskIdentityError):
+                    reason = "task_title_missing" if error.count == 0 else "task_title_ambiguous"
+                elif "Accessibility permission is not granted" in str(error):
+                    reason = "accessibility_permission_required"
                 self._send_json(
                     HTTPStatus.BAD_GATEWAY,
-                    {"ok": False, "error": "accessibility_probe_failed"},
+                    {"ok": False, "error": "accessibility_probe_failed", "reason": reason},
                 )
                 return
             count = status["stopCandidates"]
@@ -2886,8 +2937,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--codex-binary",
         type=Path,
-        default=Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
-        help="Version-matched Codex binary used for the private stdio app-server.",
+        default=None,
+        help="Desktop-bundled CLI for private stdio; by default discover current and legacy macOS layouts.",
     )
     return parser.parse_args()
 
@@ -2951,12 +3002,16 @@ def main() -> int:
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
     app_server: Optional[CodexAppServerClient] = None
-    if os.access(args.codex_binary, os.X_OK):
-        candidate = CodexAppServerClient(args.codex_binary.resolve())
+    try:
+        codex_binary = resolve_macos_codex_binary(args.codex_binary)
+    except ValueError as error:
+        print(f"managed Codex app-server unavailable: {error} Task browsing is disabled.", flush=True)
+    else:
+        candidate = CodexAppServerClient(codex_binary)
         try:
             candidate.start()
             app_server = candidate
-            print("managed Codex app-server connected over private stdio")
+            print(f"managed Codex app-server connected over private stdio: {codex_binary}", flush=True)
         except AppServerError:
             print("managed Codex app-server is unavailable; task browsing is disabled")
     server = BridgeServer(

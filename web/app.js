@@ -2208,6 +2208,7 @@ async function createNewTask() {
           });
         }
         const dispatchMessages = {
+          desktop_send_unconfirmed: "任务已创建，发送结果暂未确认；草稿已保留，请先检查对话是否收到，避免重复发送。",
           native_delivery_uncertain: "任务已创建，发送结果待确认；草稿已保留，同一条消息重试只核对回执，不会重复点击发送。",
           project_assignment_failed: "空任务已创建，但 Project/Recents 归属未确认，没有发送。请先在电脑核对归属。",
           desktop_accessibility_unavailable: "空任务已创建，但后台 Helper 的辅助功能授权已失效；请在 Mac 上重新开关授权后重试。",
@@ -4055,10 +4056,13 @@ async function startManagedTurn({ continueOnly = false } = {}) {
         feedback = "暂时找不到 Mac 的输入框或发送按钮";
         return;
       }
+      if (result.error === "desktop_send_unconfirmed") {
+        feedback = "发送结果暂未确认，草稿已保留；请先检查对话是否收到，避免重复发送";
+        return;
+      }
       if (
         result.error === "desktop_composer_write_failed"
         || result.error === "desktop_send_failed"
-        || result.error === "desktop_send_unconfirmed"
         || result.error === "desktop_dispatch_failed"
       ) {
         feedback = "Mac 没有确认发送，任务未启动";
@@ -4491,7 +4495,23 @@ async function loadThreads() {
   }
 }
 
+function desktopStatusFailureText(reason) {
+  switch (reason) {
+    case "accessibility_permission_required":
+      return `${hostLabel()} 在线 · 助手需要辅助功能授权`;
+    case "task_title_missing":
+      return `${hostLabel()} 在线 · 未识别到当前任务标题`;
+    case "task_title_ambiguous":
+      return `${hostLabel()} 在线 · 当前任务识别不唯一`;
+    case "probe_failed":
+      return `${hostLabel()} 在线 · 桌面控件读取失败`;
+    default:
+      return `${hostLabel()} 状态暂不可用`;
+  }
+}
+
 async function refreshStatusOnce() {
+  let failureReason;
   try {
     if (!deviceToken && !(await enrollDevice())) {
       setDeviceState("error", "需要配对");
@@ -4506,7 +4526,11 @@ async function refreshStatusOnce() {
       handleUnauthorized();
       return;
     }
-    if (!response.ok) throw new Error("status failed");
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      if (failure?.error === "accessibility_probe_failed") failureReason = failure.reason;
+      throw new Error("status failed");
+    }
     const status = await response.json();
     applyBridgeCapabilities(status.capabilities);
     const previousTitle = currentTaskTitle;
@@ -4600,7 +4624,7 @@ async function refreshStatusOnce() {
     desktopRequest = undefined;
     managedRenderSignature = "";
     renderManagedRun();
-    setDeviceState("error", `${hostLabel()} 状态暂不可用`);
+    setDeviceState("error", desktopStatusFailureText(failureReason));
     renderProjectGroups();
     updateComposerState();
   }

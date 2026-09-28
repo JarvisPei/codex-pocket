@@ -242,9 +242,27 @@ func prepareElectronAccessibilityTree(timeout: TimeInterval = 5.0) -> Bool {
 }
 
 func scanBottomOfWindows(performStop: Bool, checkStop: Bool) {
+    if performStop || checkStop {
+        // Status, Send and Stop must agree on the same centered composer scan.
+        let stopCandidates = composerCandidates().stopButtons
+        if checkStop {
+            print("{\"stopCandidates\":\(stopCandidates.count)}")
+            return
+        }
+        guard stopCandidates.count == 1 else {
+            fputs("Refusing to interrupt: expected exactly one semantic Stop button, found \(stopCandidates.count).\n", stderr)
+            exit(4)
+        }
+        let result = AXUIElementPerformAction(stopCandidates[0], kAXPressAction as CFString)
+        guard result == .success else {
+            fputs("Failed to press the semantic Stop button: AX error \(result.rawValue).\n", stderr)
+            exit(5)
+        }
+        print("Pressed the semantic Stop button in the active ChatGPT/Codex window.")
+        return
+    }
     let windows = activeWindows()
     var hitElements = Set<CFHashCode>()
-    var stopCandidates: [AXUIElement] = []
 
     for (windowIndex, window) in windows.enumerated() {
         guard
@@ -273,18 +291,6 @@ func scanBottomOfWindows(performStop: Bool, checkStop: Bool) {
                         if role == kAXButtonRole as String ||
                             actionNames.contains(kAXPressAction as String)
                         {
-                            let isExactStop =
-                                role == kAXButtonRole as String &&
-                                fields.contains(where: {
-                                    composerStopTerms.contains(
-                                        $0.trimmingCharacters(in: .whitespacesAndNewlines)
-                                            .lowercased()
-                                    )
-                                }) &&
-                                actionNames.contains(kAXPressAction as String)
-                            if isExactStop {
-                                stopCandidates.append(hit)
-                            }
                             if !performStop && !checkStop {
                                 print(
                                     """
@@ -305,27 +311,6 @@ func scanBottomOfWindows(performStop: Bool, checkStop: Bool) {
         }
     }
 
-    if checkStop {
-        print("{\"stopCandidates\":\(stopCandidates.count)}")
-        return
-    }
-    guard performStop else { return }
-    guard stopCandidates.count == 1 else {
-        fputs(
-            "Refusing to interrupt: expected exactly one semantic Stop button, found \(stopCandidates.count).\n",
-            stderr
-        )
-        exit(4)
-    }
-    let result = AXUIElementPerformAction(
-        stopCandidates[0],
-        kAXPressAction as CFString
-    )
-    guard result == .success else {
-        fputs("Failed to press the semantic Stop button: AX error \(result.rawValue).\n", stderr)
-        exit(5)
-    }
-    print("Pressed the semantic Stop button in the active ChatGPT/Codex window.")
 }
 
 func inspectWindowHeaders() {
@@ -374,8 +359,104 @@ func inspectWindowHeaders() {
     }
 }
 
+// BEGIN PURE HEADER RULES -- also compiled by the fixture tests, without AX access.
+func taskHeaderBand(window: CGRect) -> CGRect {
+    let left = min(250.0, window.width * 0.18)
+    let right = min(950.0, window.width * 0.72)
+    return CGRect(x: window.minX + left, y: window.minY + 8,
+                  width: max(0, right - left), height: min(44, window.height * 0.06))
+}
+
+func isTaskHeaderContainer(role: String, subrole: String, frame: CGRect,
+                           window: CGRect) -> Bool {
+    // The unified shell renders an HTML <header>, exposed as a banner landmark,
+    // rather than necessarily creating a native macOS toolbar. Require a narrow
+    // top-level header frame; a banner inside a conversation is not sufficient.
+    let semanticHeader = role == "AXToolbar" ||
+        (role == "AXGroup" && subrole == "AXLandmarkBanner")
+    return semanticHeader && frame.minX.isFinite && frame.minY.isFinite &&
+        frame.width.isFinite && frame.height.isFinite &&
+        frame.width > 0 && frame.height > 0 &&
+        frame.minY >= window.minY && frame.maxY <= window.minY + 56 &&
+        frame.minX >= window.minX && frame.maxX <= window.maxX
+}
+
+func taskHeaderTexts(role: String, frame: CGRect, window: CGRect,
+                     value: String?, title: String?) -> [String] {
+    // Labels only: never infer identity from a generic group's description,
+    // sidebar selection, window name, or a button that happens to have text.
+    guard role == "AXStaticText", frame.width > 0, frame.height > 0,
+          frame.minY.isFinite, frame.minX.isFinite,
+          frame.width.isFinite, frame.height.isFinite,
+          taskHeaderBand(window: window).contains(frame) else { return [] }
+    var result: [String] = []
+    for raw in [value, title].compactMap({ $0 }) {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !text.isEmpty && text.count <= 1_000 && !result.contains(text) {
+            result.append(text)
+        }
+    }
+    return result
+}
+// END PURE HEADER RULES
+
+func taskTitlesFromHeaderTree(_ window: AXUIElement) -> [String]? {
+    guard let position = pointAttribute(window, kAXPositionAttribute as CFString),
+          let size = sizeAttribute(window, kAXSizeAttribute as CFString)
+    else { return nil }
+    let windowFrame = CGRect(origin: position, size: size)
+    let band = taskHeaderBand(window: windowFrame)
+    var visitedElements = Set<CFHashCode>()
+    var titles: [String] = []
+    var truncated = false
+
+    func scanHeader(_ element: AXUIElement, depth: Int, insideHeader: Bool) {
+        let hash = CFHash(element)
+        guard !visitedElements.contains(hash) else { return }
+        guard depth <= 32, visitedElements.count < 2_500 else {
+            truncated = true
+            return
+        }
+        visitedElements.insert(hash)
+        let role = stringAttribute(element, kAXRoleAttribute as CFString) ?? ""
+        guard role != "AXOutline",
+              (attribute(element, "AXHidden" as CFString) as? Bool) != true
+        else { return }
+        // WebArea / ScrollArea can wrap the entire Electron surface, including
+        // the top banner. Traverse these containers, but never use their own
+        // text as identity evidence or accept arbitrary text elsewhere in them.
+        var isHeader = insideHeader
+        if let point = pointAttribute(element, kAXPositionAttribute as CFString),
+           let size = sizeAttribute(element, kAXSizeAttribute as CFString),
+           size.width > 0, size.height > 0 {
+            let frame = CGRect(origin: point, size: size)
+            // Keep only subtrees that overlap the visible top-title region.
+            guard band.intersects(frame) else { return }
+            isHeader = isHeader || isTaskHeaderContainer(
+                role: role,
+                subrole: stringAttribute(element, kAXSubroleAttribute as CFString) ?? "",
+                frame: frame, window: windowFrame
+            )
+            let values = isHeader ? taskHeaderTexts(
+                role: role,
+                frame: frame, window: windowFrame,
+                value: stringAttribute(element, kAXValueAttribute as CFString),
+                title: stringAttribute(element, kAXTitleAttribute as CFString)
+            ) : []
+            for value in values where !titles.contains(value) { titles.append(value) }
+        }
+        for child in children(element) {
+            scanHeader(child, depth: depth + 1, insideHeader: isHeader)
+        }
+    }
+    scanHeader(window, depth: 0, insideHeader: false)
+    // An incomplete scan cannot prove that a title is unique.
+    return truncated ? nil : titles
+}
+
 func currentTaskTitles() -> [String] {
     let windows = activeWindows()
+    guard windows.count == 1 else { return [] }
     var hitElements = Set<CFHashCode>()
     var titles: [String] = []
 
@@ -402,11 +483,16 @@ func currentTaskTitles() -> [String] {
                        stringAttribute(hit, kAXRoleAttribute as CFString) ==
                         kAXStaticTextRole as String
                     {
-                        let values = normalizedFields(hit)
-                            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                            .filter { !$0.isEmpty && !$0.hasPrefix("AX") }
-                        for value in values where !titles.contains(value) {
-                            titles.append(value)
+                        if let hitPosition = pointAttribute(hit, kAXPositionAttribute as CFString),
+                           let hitSize = sizeAttribute(hit, kAXSizeAttribute as CFString) {
+                            let values = taskHeaderTexts(
+                                role: "AXStaticText",
+                                frame: CGRect(origin: hitPosition, size: hitSize),
+                                window: CGRect(origin: position, size: size),
+                                value: stringAttribute(hit, kAXValueAttribute as CFString),
+                                title: stringAttribute(hit, kAXTitleAttribute as CFString)
+                            )
+                            for value in values where !titles.contains(value) { titles.append(value) }
                         }
                     }
                 }
@@ -414,6 +500,13 @@ func currentTaskTitles() -> [String] {
             }
             y += 8
         }
+    }
+    // New native headers may return a containing AXGroup from hit testing.
+    // Use the tree only when the legacy scan found no text. Never replace an
+    // ambiguous legacy result with a convenient single tree match.
+    if titles.isEmpty {
+        guard let treeTitles = taskTitlesFromHeaderTree(windows[0]) else { return [] }
+        for title in treeTitles where !titles.contains(title) { titles.append(title) }
     }
     return titles
 }
@@ -480,6 +573,77 @@ func exactSemanticMatch(_ element: AXUIElement, terms: Set<String>) -> Bool {
     })
 }
 
+// BEGIN PURE COMPOSER SCAN -- fixture tests inject nodes, never Accessibility APIs.
+struct ComposerScanInfo {
+    let role: String
+    let frame: CGRect?
+    var hidden = false
+    var send = false
+    var resume = false
+    var stop = false
+}
+
+struct ComposerTreeScan<Node> {
+    var textAreas: [Node] = []
+    var sendButtons: [Node] = []
+    var resumeButtons: [Node] = []
+    var stopButtons: [Node] = []
+}
+
+func scanComposerTree<Node>(
+    _ rootNode: Node, window: CGRect,
+    identity: (Node) -> UInt,
+    info: (Node) -> ComposerScanInfo,
+    childNodes: (Node) -> [Node]
+) -> ComposerTreeScan<Node> {
+    // Centered/narrow composers need not intersect the old rightmost 560 px.
+    let region = CGRect(x: window.minX, y: max(window.minY, window.maxY - 210),
+                        width: window.width, height: min(210, window.height))
+    var found = ComposerTreeScan<Node>()
+    var visitedNodes = Set<UInt>()
+    var truncated = false
+
+    func visit(_ node: Node, depth: Int, clip: CGRect) {
+        let key = identity(node)
+        guard !visitedNodes.contains(key) else { return }
+        guard depth <= 40, visitedNodes.count < 2_500 else {
+            truncated = true
+            return
+        }
+        visitedNodes.insert(key)
+        let item = info(node)
+        guard !item.hidden, item.role != "AXOutline",
+              depth == 0 || item.role != "AXWindow" else { return }
+        var childClip = clip
+        if let frame = item.frame, frame.width > 0, frame.height > 0,
+           frame.minX.isFinite, frame.minY.isFinite,
+           frame.width.isFinite, frame.height.isFinite {
+            let visible = frame.intersection(clip)
+            guard !visible.isNull, visible.intersects(region) else { return }
+            if item.role == "AXScrollArea" || item.role == "AXWebArea" {
+                childClip = visible
+            }
+            if item.role == "AXTextArea" {
+                found.textAreas.append(node)
+                return // Paragraph/placeholder descendants are not other editors.
+            }
+            if item.role == "AXButton" {
+                if item.send { found.sendButtons.append(node) }
+                if item.resume { found.resumeButtons.append(node) }
+                if item.stop { found.stopButtons.append(node) }
+                return
+            }
+        }
+        for child in childNodes(node) {
+            visit(child, depth: depth + 1, clip: childClip)
+        }
+    }
+    visit(rootNode, depth: 0, clip: window)
+    // Partial traversal cannot establish uniqueness. Never use its first match.
+    return truncated ? ComposerTreeScan<Node>() : found
+}
+// END PURE COMPOSER SCAN
+
 func composerCandidates() -> ComposerCandidates {
     guard let windowValue = attribute(
         root,
@@ -491,46 +655,30 @@ func composerCandidates() -> ComposerCandidates {
         let size = sizeAttribute(window, kAXSizeAttribute as CFString)
     else { return ComposerCandidates() }
 
-    var result = ComposerCandidates()
-    var hitElements = Set<CFHashCode>()
-    let startX = position.x + max(0, size.width - 560)
-    let endX = position.x + size.width
-    let startY = position.y + max(0, size.height - 210)
-    let endY = position.y + size.height
-    var y = startY
-    while y <= endY {
-        var x = startX
-        while x <= endX {
-            var hit: AXUIElement?
-            if AXUIElementCopyElementAtPosition(root, Float(x), Float(y), &hit) == .success,
-               let hit
-            {
-                let hash = CFHash(hit)
-                if hitElements.insert(hash).inserted {
-                    let role = stringAttribute(hit, kAXRoleAttribute as CFString) ?? ""
-                    let actionNames = actions(hit)
-                    if role == kAXTextAreaRole as String {
-                        result.textAreas.append(hit)
-                    } else if role == kAXButtonRole as String,
-                              actionNames.contains(kAXPressAction as String)
-                    {
-                        if exactSemanticMatch(hit, terms: composerSendTerms) {
-                            result.sendButtons.append(hit)
-                        }
-                        if exactSemanticMatch(hit, terms: composerResumeTerms) {
-                            result.resumeButtons.append(hit)
-                        }
-                        if exactSemanticMatch(hit, terms: composerStopTerms) {
-                            result.stopButtons.append(hit)
-                        }
-                    }
-                }
+    let scan = scanComposerTree(
+        window, window: CGRect(origin: position, size: size),
+        identity: { UInt(CFHash($0)) },
+        info: { hit in
+            let role = stringAttribute(hit, kAXRoleAttribute as CFString) ?? ""
+            let point = pointAttribute(hit, kAXPositionAttribute as CFString)
+            let size = sizeAttribute(hit, kAXSizeAttribute as CFString)
+            let frame: CGRect? = point.flatMap { point in
+                size.map { CGRect(origin: point, size: $0) }
             }
-            x += 10
-        }
-        y += 10
-    }
-    return result
+            let pressable = role == kAXButtonRole as String &&
+                actions(hit).contains(kAXPressAction as String)
+            return ComposerScanInfo(
+                role: role, frame: frame,
+                hidden: (attribute(hit, "AXHidden" as CFString) as? Bool) == true,
+                send: pressable && exactSemanticMatch(hit, terms: composerSendTerms),
+                resume: pressable && exactSemanticMatch(hit, terms: composerResumeTerms),
+                stop: pressable && exactSemanticMatch(hit, terms: composerStopTerms)
+            )
+        },
+        childNodes: children
+    )
+    return ComposerCandidates(textAreas: scan.textAreas, sendButtons: scan.sendButtons,
+                              resumeButtons: scan.resumeButtons, stopButtons: scan.stopButtons)
 }
 
 func composerIsEmpty(_ textArea: AXUIElement) -> Bool {
@@ -684,7 +832,59 @@ func clonedPasteboardItems(_ items: [NSPasteboardItem]?) -> [NSPasteboardItem] {
     }
 }
 
+// BEGIN PURE ATTACHMENT SCAN -- bounded tree traversal, no per-pixel AX queries.
+func attachmentNodes<Node>(
+    _ rootNode: Node, window: CGRect, region: CGRect,
+    identity: (Node) -> UInt, info: (Node) -> ComposerScanInfo,
+    childNodes: (Node) -> [Node]
+) -> [Node]? {
+    guard region.width > 0, region.height > 0 else { return nil }
+    var found: [Node] = []
+    var visited = Set<UInt>()
+    var truncated = false
+    func visit(_ node: Node, depth: Int, clip: CGRect) {
+        guard !truncated else { return }
+        let key = identity(node)
+        guard !visited.contains(key) else { return }
+        guard depth <= 40, visited.count < 1_500 else {
+            truncated = true
+            return
+        }
+        visited.insert(key)
+        let item = info(node)
+        guard !item.hidden, item.role != "AXOutline",
+              depth == 0 || item.role != "AXWindow" else { return }
+        var childClip = clip
+        if let frame = item.frame, frame.width > 0, frame.height > 0,
+           frame.minX.isFinite, frame.minY.isFinite,
+           frame.width.isFinite, frame.height.isFinite {
+            let visible = frame.intersection(clip)
+            guard !visible.isNull, visible.intersects(region) else { return }
+            if item.role == "AXScrollArea" || item.role == "AXWebArea" {
+                childClip = visible
+            }
+            if ["AXGroup", "AXButton", "AXImage", "AXStaticText"].contains(item.role) {
+                // A partly intersecting history image must not count as a preview.
+                if region.contains(frame) { found.append(node) }
+                // File chips sometimes expose their filename on the group.
+                // Still traverse it for the image/remove control underneath.
+                if item.role != "AXGroup" { return }
+            }
+        }
+        // Editor text is not an attachment filename; do not read its paragraphs.
+        guard item.role != "AXTextArea" else { return }
+        for child in childNodes(node) {
+            visit(child, depth: depth + 1, clip: childClip)
+            if truncated { return }
+        }
+    }
+    visit(rootNode, depth: 0, clip: window)
+    return truncated ? nil : found
+}
+// END PURE ATTACHMENT SCAN
+
 struct ComposerAttachmentEvidence {
+    var complete = false
     var names = Set<String>()
     var removalControls = 0
     var previewImages = 0
@@ -728,66 +928,52 @@ func composerAttachmentEvidence(_ expectedNames: Set<String>) -> ComposerAttachm
         windowPosition.y + windowSize.height,
         textAreaPosition.y + textAreaSize.height
     )
-    var evidence = ComposerAttachmentEvidence()
-    var hitElements = Set<CFHashCode>()
-    var y = startY
-    while y <= endY {
-        var x = startX
-        while x <= endX {
-            var hit: AXUIElement?
-            if AXUIElementCopyElementAtPosition(
-                root,
-                Float(x),
-                Float(y),
-                &hit
-            ) == .success, let hit {
-                let hash = CFHash(hit)
-                guard hitElements.insert(hash).inserted else {
-                    x += 12
-                    continue
-                }
-                let role = stringAttribute(hit, kAXRoleAttribute as CFString) ?? ""
-                let position = pointAttribute(hit, kAXPositionAttribute as CFString)
-                let size = sizeAttribute(hit, kAXSizeAttribute as CFString)
-                let fields = normalizedFields(hit)
-                for field in fields {
-                    let value = field.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if expectedNames.contains(value) {
-                        evidence.names.insert(value)
-                    }
-                }
-                if role == kAXButtonRole as String,
-                   actions(hit).contains(kAXPressAction as String) {
-                    let label = elementSemanticLabel(hit).lowercased()
-                    let removalTerms = [
-                        "remove attachment", "remove file", "remove image",
-                        "delete attachment", "delete file", "delete image",
-                        "remove", "delete", "close", "移除", "删除",
-                    ]
-                    if removalTerms.contains(where: { label == $0 || label.contains($0) }) {
-                        evidence.removalControls += 1
-                    } else if label.isEmpty,
-                              let position, let size,
-                              position.y + size.height / 2 < textAreaPosition.y,
-                              size.width <= 80, size.height <= 80 {
-                        // Electron does not currently label the image thumbnail's
-                        // small remove button. Only an unlabelled control can be
-                        // used as fallback evidence: labelled history activity
-                        // buttons such as "Ran commands" can sit immediately above
-                        // the composer in long tasks and are not attachments.
-                        evidence.upperComposerButtons += 1
-                    }
-                }
-                if role == kAXImageRole as String,
-                   let size,
-                   size.width >= 40, size.width <= 320,
-                   size.height >= 40, size.height <= 320 {
-                    evidence.previewImages += 1
-                }
-            }
-            x += 12
+    let region = CGRect(x: startX, y: startY, width: endX - startX, height: endY - startY)
+    guard let nodes = attachmentNodes(
+        window, window: CGRect(origin: windowPosition, size: windowSize), region: region,
+        identity: { UInt(CFHash($0)) },
+        info: { node in
+            let position = pointAttribute(node, kAXPositionAttribute as CFString)
+            let size = sizeAttribute(node, kAXSizeAttribute as CFString)
+            return ComposerScanInfo(
+                role: stringAttribute(node, kAXRoleAttribute as CFString) ?? "",
+                frame: position.flatMap { p in size.map { CGRect(origin: p, size: $0) } },
+                hidden: (attribute(node, "AXHidden" as CFString) as? Bool) == true
+            )
+        }, childNodes: children
+    ) else { return ComposerAttachmentEvidence() }
+    var evidence = ComposerAttachmentEvidence(complete: true)
+    for hit in nodes {
+        let role = stringAttribute(hit, kAXRoleAttribute as CFString) ?? ""
+        let position = pointAttribute(hit, kAXPositionAttribute as CFString)
+        let size = sizeAttribute(hit, kAXSizeAttribute as CFString)
+        for field in normalizedFields(hit) {
+            let value = field.trimmingCharacters(in: .whitespacesAndNewlines)
+            if expectedNames.contains(value) { evidence.names.insert(value) }
         }
-        y += 12
+        if role == kAXButtonRole as String,
+           actions(hit).contains(kAXPressAction as String) {
+            let label = elementSemanticLabel(hit).lowercased()
+            let removalTerms = [
+                "remove attachment", "remove file", "remove image",
+                "delete attachment", "delete file", "delete image",
+                "remove", "delete", "close", "移除", "删除",
+            ]
+            if removalTerms.contains(where: { label == $0 || label.contains($0) }) {
+                evidence.removalControls += 1
+            } else if label.isEmpty, let position, let size,
+                      position.y + size.height / 2 < textAreaPosition.y,
+                      size.width <= 80, size.height <= 80 {
+                // Only unlabelled small controls qualify: labelled history
+                // activity buttons just above the composer are not attachments.
+                evidence.upperComposerButtons += 1
+            }
+        }
+        if role == kAXImageRole as String, let size,
+           size.width >= 40, size.width <= 320,
+           size.height >= 40, size.height <= 320 {
+            evidence.previewImages += 1
+        }
     }
     return evidence
 }
@@ -796,11 +982,8 @@ func attachmentEvidenceMatches(
     _ evidence: ComposerAttachmentEvidence,
     expectedNames: Set<String>
 ) -> Bool {
-    evidence.names == expectedNames || evidence.estimatedCount == expectedNames.count
-}
-
-func visibleComposerAttachmentNames(_ expectedNames: Set<String>) -> Set<String> {
-    composerAttachmentEvidence(expectedNames).names
+    evidence.complete && !expectedNames.isEmpty &&
+        (evidence.names == expectedNames || evidence.estimatedCount == expectedNames.count)
 }
 
 func pasteAttachments(_ urls: [URL], into textArea: AXUIElement) -> Bool {
@@ -815,6 +998,8 @@ func pasteAttachments(_ urls: [URL], into textArea: AXUIElement) -> Bool {
         kAXSizeAttribute as CFString
     )
     let existingEvidence = composerAttachmentEvidence(expectedNames)
+    // An incomplete scan cannot prove that the composer has no attachments.
+    guard existingEvidence.complete else { return false }
     if attachmentEvidenceMatches(existingEvidence, expectedNames: expectedNames) {
         return true
     }
@@ -823,6 +1008,7 @@ func pasteAttachments(_ urls: [URL], into textArea: AXUIElement) -> Bool {
     }
 
     let pasteboard = NSPasteboard.general
+    desktopSendStage("attachment-clipboard")
     let backup = clonedPasteboardItems(pasteboard.pasteboardItems)
     pasteboard.clearContents()
     if urls.count == 1, NSImage(contentsOf: urls[0]) != nil {
@@ -840,8 +1026,10 @@ func pasteAttachments(_ urls: [URL], into textArea: AXUIElement) -> Bool {
         }
     }
 
+    desktopSendStage("attachment-paste")
     _ = AXUIElementPerformAction(textArea, kAXPressAction as CFString)
     guard performSystemEventsPaste() else { return false }
+    desktopSendStage("attachment-confirmation")
     var missingTextAreaSamples = 0
     var lastEvidence = ComposerAttachmentEvidence()
     for _ in 0..<80 {
@@ -1316,7 +1504,76 @@ func failDesktopSend(_ message: String, code: Int32) -> Never {
     exit(code)
 }
 
+// BEGIN PURE COMPOSER READINESS -- independent of AX and clocks for replay tests.
+enum ComposerReadinessDecision: Equatable {
+    case waiting, ready, busy, ambiguous, taskChanged
+}
+
+struct ComposerReadinessGate {
+    private var previousEditor: UInt?
+
+    mutating func observe(titleMatches: Bool, differentTask: Bool,
+                          editors: [UInt], stopCount: Int,
+                          editorEnabled: Bool) -> ComposerReadinessDecision {
+        if differentTask { previousEditor = nil; return .taskChanged }
+        guard titleMatches else { previousEditor = nil; return .waiting }
+        if stopCount > 0 { previousEditor = nil; return .busy }
+        if editors.count > 1 { previousEditor = nil; return .ambiguous }
+        guard editors.count == 1, editorEnabled else {
+            previousEditor = nil
+            return .waiting
+        }
+        let editor = editors[0]
+        let stable = previousEditor == editor
+        previousEditor = editor
+        return stable ? .ready : .waiting
+    }
+}
+// END PURE COMPOSER READINESS
+
+func waitForDesktopComposer(expectedTitle: String, timeout: TimeInterval = 3.0) -> ComposerCandidates {
+    let deadline = Date().addingTimeInterval(timeout)
+    var gate = ComposerReadinessGate()
+    var lastCount = 0
+    repeat {
+        let titlesBefore = currentTaskTitles()
+        let candidates = composerCandidates()
+        let titlesAfter = currentTaskTitles()
+        lastCount = candidates.textAreas.count
+        let matches = titlesBefore == [expectedTitle] && titlesAfter == [expectedTitle]
+        let changed = [titlesBefore, titlesAfter].contains {
+            $0.count == 1 && $0[0] != expectedTitle
+        }
+        let enabled = candidates.textAreas.count == 1 &&
+            (attribute(candidates.textAreas[0], kAXEnabledAttribute as CFString) as? Bool) != false
+        switch gate.observe(
+            titleMatches: matches, differentTask: changed,
+            editors: candidates.textAreas.map { UInt(CFHash($0)) },
+            stopCount: candidates.stopButtons.count, editorEnabled: enabled
+        ) {
+        case .ready:
+            return candidates
+        case .busy:
+            failDesktopSend("The requested Codex task is already running.", code: 27)
+        case .ambiguous:
+            failDesktopSend("Expected one Codex composer text area, found \(lastCount).", code: 28)
+        case .taskChanged:
+            failDesktopSend("Codex task identity changed while waiting for its composer.", code: 32)
+        case .waiting:
+            if Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        }
+    } while Date() < deadline
+    failDesktopSend("Codex composer did not become ready before the deadline; found \(lastCount) text areas. No message was entered.", code: 28)
+}
+
+func desktopSendStage(_ stage: String) {
+    // Fixed phase names only: never log the message, title, or attachment path.
+    fputs("desktop-send stage=\(stage)\n", stderr)
+    fflush(stderr)
+}
+
 func performDesktopSend() {
+    desktopSendStage("preflight")
     let input = FileHandle.standardInput.readDataToEndOfFile()
     guard
         input.count <= 24_000,
@@ -1386,13 +1643,9 @@ func performDesktopSend() {
         )
     }
 
-    var candidates = composerCandidates()
-    guard candidates.stopButtons.isEmpty else {
-        failDesktopSend("The requested Codex task is already running.", code: 27)
-    }
-    guard candidates.textAreas.count == 1 else {
-        failDesktopSend("Expected one Codex composer text area.", code: 28)
-    }
+    // A same-thread deep link can leave the old title visible while the editor
+    // is being remounted. Title matching alone is not a composer-ready signal.
+    var candidates = waitForDesktopComposer(expectedTitle: expectedTitle)
     var textArea = candidates.textAreas[0]
     let existingText = composerText(textArea)
     let reuseMatchingDraft = !payload.continueOnly && existingText == message
@@ -1460,17 +1713,11 @@ func performDesktopSend() {
             failDesktopSend("Unable to focus the Codex composer.", code: 35)
         }
         Thread.sleep(forTimeInterval: 0.1)
-        let existingAttachmentNames = visibleComposerAttachmentNames(
-            Set(attachmentURLs.map(\.lastPathComponent))
-        )
-        if !existingAttachmentNames.isEmpty,
-           existingAttachmentNames.count != attachmentURLs.count
-        {
-            failDesktopSend("The Codex composer contains only part of the requested attachments.", code: 44)
-        }
+        desktopSendStage("attachment-preflight")
         guard pasteAttachments(attachmentURLs, into: textArea) else {
             failDesktopSend("Codex did not confirm the requested attachments.", code: 43)
         }
+        desktopSendStage("composer-after-attachment")
         var replacementTextArea: AXUIElement?
         for _ in 0..<150 {
             candidates = composerCandidates()
@@ -1514,6 +1761,7 @@ func performDesktopSend() {
             }
         }
         if !message.isEmpty {
+            desktopSendStage("text-input")
             var inputConfirmed = false
 
             func refreshComposerTextArea() -> AXUIElement? {
@@ -1591,6 +1839,7 @@ func performDesktopSend() {
         }
     }
 
+    desktopSendStage("send-button")
     var sendButton: AXUIElement?
     for _ in 0..<30 {
         candidates = composerCandidates()
@@ -1618,6 +1867,7 @@ func performDesktopSend() {
     guard titleMatchedBeforePress else {
         failDesktopSend("Codex task identity changed before sending.", code: 32)
     }
+    desktopSendStage("submission")
     if !clickElementCenter(sendButton) {
         let pressResult = AXUIElementPerformAction(sendButton, kAXPressAction as CFString)
         guard pressResult == .success else {
@@ -1662,7 +1912,7 @@ func performDesktopSend() {
             }
             if !expectedAttachmentNames.isEmpty {
                 let evidence = composerAttachmentEvidence(expectedAttachmentNames)
-                if evidence.names.isEmpty && evidence.estimatedCount == 0 {
+                if evidence.complete && evidence.names.isEmpty && evidence.estimatedCount == 0 {
                     return (true, latestStopCount)
                 }
             }

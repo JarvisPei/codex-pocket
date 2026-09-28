@@ -87,6 +87,8 @@ zsh scripts/install-mac-bridge-launch-agent.sh
 
 首次安装后，在“系统设置 → 隐私与安全性 → 辅助功能”中允许 `Mobile Codex Bridge Helper`。底层 Bundle、LaunchAgent 和 Keychain 标识暂时保留旧的 `mobile-codex-bridge` 名称，以兼容已经授权的安装。
 
+Bridge 启动时会自动识别 `/Applications` 或 `~/Applications` 下的 `ChatGPT.app` / `Codex.app`，兼容新版嵌套 `CodexCLI.app` 和旧版 CLI 目录。安装了多个版本或使用自定义位置时，请通过 `mac_bridge.py --codex-binary /实际路径/codex` 明确指定；不会自动使用 PATH 中可能不匹配的 CLI。
+
 本机检查：
 
 ```sh

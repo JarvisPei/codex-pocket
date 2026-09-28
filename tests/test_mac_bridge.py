@@ -3,6 +3,7 @@ import http.client
 import json
 import os
 import stat
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -19,6 +20,7 @@ from mac_bridge import (
     DeviceRegistry,
     StopCandidateError,
     TaskChangedError,
+    TaskIdentityError,
     desktop_message_landed,
     load_token,
     read_mac_battery,
@@ -1840,6 +1842,20 @@ class BridgeApiTest(unittest.TestCase):
         self.assertEqual(payload["stopCandidates"], 1)
         self.assertEqual(payload["taskTitle"], "继续项目开发")
 
+    def test_status_failure_exposes_only_safe_diagnostic_reason(self):
+        cases = [
+            (TaskIdentityError(0), "task_title_missing"),
+            (TaskIdentityError(29), "task_title_ambiguous"),
+            (RuntimeError("Accessibility permission is not granted to this process."),
+             "accessibility_permission_required"),
+            (RuntimeError("private diagnostic details"), "probe_failed"),
+        ]
+        for error, reason in cases:
+            with self.subTest(reason=reason), patch.object(self.controller, "status", side_effect=error):
+                status, payload = self.request("GET", "/api/desktop/interrupt/status")
+                self.assertEqual(status, 502)
+                self.assertEqual(payload, {"ok": False, "error": "accessibility_probe_failed", "reason": reason})
+
     def test_status_exposes_safe_desktop_request(self):
         self.controller.desktop_request = {
             "kind": "approval",
@@ -2254,6 +2270,42 @@ class DesktopControllerCommandTest(unittest.TestCase):
         self.assertTrue(payload["continueOnly"])
         self.assertEqual(payload["message"], "")
         self.assertEqual(payload["attachmentPaths"], [])
+
+    @patch("mac_bridge.time.sleep")
+    @patch("mac_bridge.subprocess.run")
+    def test_desktop_timeout_is_uncertain_and_never_retried(self, run, sleep):
+        controller = DesktopController(
+            Path("/repo/scripts/codex-ax.swift"),
+            ax_helper=Path("/Applications/MobileCodexBridge/mobile-codex-ax"),
+        )
+        for stderr in (None, "desktop-send stage=attachment-confirmation\n",
+                       b"desktop-send stage=preflight\ndesktop-send stage=submission\nprivate text"):
+            with self.subTest(stderr=stderr):
+                run.reset_mock()
+                run.side_effect = subprocess.TimeoutExpired("helper", 25, stderr=stderr)
+                with self.assertRaises(DesktopDispatchError) as raised:
+                    controller.send_to_desktop("thread-1", "title", "message",
+                                               attachment_paths=["/uploads/photo.jpg"])
+                self.assertEqual(raised.exception.reason, "desktop_send_unconfirmed")
+                self.assertNotIn("private text", str(raised.exception))
+                self.assertIn("not retrying", str(raised.exception))
+                self.assertEqual(run.call_count, 1)
+                sleep.assert_not_called()
+
+    @patch("mac_bridge.time.sleep")
+    @patch("mac_bridge.subprocess.run")
+    def test_timeout_on_bounded_attachment_retry_is_also_uncertain(self, run, sleep):
+        controller = DesktopController(Path("/repo/scripts/codex-ax.swift"))
+        run.side_effect = [
+            subprocess.CompletedProcess("helper", 28, stdout="", stderr="no composer"),
+            subprocess.TimeoutExpired("helper", 25),
+        ]
+        with self.assertRaises(DesktopDispatchError) as raised:
+            controller.send_to_desktop("thread-1", "title", "message",
+                                       attachment_paths=["/uploads/photo.jpg"])
+        self.assertEqual(raised.exception.reason, "desktop_send_unconfirmed")
+        self.assertEqual(run.call_count, 2)
+        sleep.assert_called_once_with(3.0)
 
     @patch("mac_bridge.subprocess.run")
     def test_desktop_send_maps_active_turn_conflict(self, run):

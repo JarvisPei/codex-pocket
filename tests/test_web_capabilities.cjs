@@ -5,6 +5,44 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.join(__dirname, '../web/app.js'), 'utf8');
+test('uncertain desktop sends do not claim the task was never started', () => {
+  const branch = between('if (result.error === "desktop_send_unconfirmed")',
+    'result.error === "desktop_composer_write_failed"');
+  assert.match(branch, /发送结果暂未确认/);
+  assert.match(branch, /避免重复发送/);
+  assert.doesNotMatch(branch, /任务未启动/);
+  assert.match(source, /desktop_send_unconfirmed: "任务已创建，发送结果暂未确认/);
+});
+test('status failure distinguishes permission and identity without trusting raw server text', async () => {
+  const messages = [];
+  const context = vm.createContext({
+    hostLabel: () => 'Mac', deviceToken: 'test-token',
+    authorizationHeaders: () => ({}),
+    renderManagedRun() {}, renderProjectGroups() {}, updateComposerState() {},
+    setDeviceState: (_, text) => messages.push(text),
+    currentStopCandidates: 1, desktopStatusKnown: true, desktopRequest: {},
+    managedRenderSignature: 'old',
+  });
+  vm.runInContext(between('function desktopStatusFailureText(', 'async function refreshStatus()'), context);
+  for (const [reason, expected] of [
+    ['accessibility_permission_required', '助手需要辅助功能授权'],
+    ['task_title_missing', '未识别到当前任务标题'],
+    ['task_title_ambiguous', '当前任务识别不唯一'],
+    ['probe_failed', '桌面控件读取失败'],
+    ['private arbitrary error', '状态暂不可用'],
+  ]) {
+    context.fetch = async () => ({status: 502, ok: false,
+      json: async () => ({error: 'accessibility_probe_failed', reason})});
+    await context.refreshStatusOnce();
+    assert.match(messages.at(-1), new RegExp(expected));
+    assert.equal(context.desktopStatusKnown, false);
+    assert.equal(context.currentStopCandidates, -1);
+    assert.equal(context.desktopRequest, undefined);
+  }
+  context.fetch = async () => { throw new Error('network error'); };
+  await context.refreshStatusOnce();
+  assert.equal(messages.at(-1), 'Mac 状态暂不可用');
+});
 function between(start, end) {
   return source.slice(source.indexOf(start), source.indexOf(end, source.indexOf(start)));
 }

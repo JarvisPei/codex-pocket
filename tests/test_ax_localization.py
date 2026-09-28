@@ -39,7 +39,7 @@ class AccessibilityLocalizationTest(unittest.TestCase):
             "exactSemanticMatch(hit, terms: composerStopTerms)",
             SOURCE,
         )
-        self.assertIn("composerStopTerms.contains(", SOURCE)
+        self.assertIn("composerCandidates().stopButtons", SOURCE)
 
     def test_resume_is_separate_from_send_in_each_supported_language(self):
         resume = string_set("composerResumeTerms")

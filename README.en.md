@@ -81,6 +81,8 @@ The installer creates and starts a user LaunchAgent, uses a Keychain-backed brid
 
 After the first install, allow `Mobile Codex Bridge Helper` in System Settings → Privacy & Security → Accessibility. Low-level bundle, LaunchAgent, and Keychain identifiers intentionally retain the legacy `mobile-codex-bridge` name so existing Accessibility grants remain valid.
 
+At startup, Bridge discovers `ChatGPT.app` / `Codex.app` in `/Applications` or `~/Applications`, supporting both the newer nested `CodexCLI.app` and the legacy CLI layout. For multiple installations or custom locations, explicitly pass `mac_bridge.py --codex-binary /actual/path/codex`; Bridge does not fall back to a potentially mismatched CLI on PATH.
+
 Check the local service:
 
 ```sh
